@@ -1,0 +1,1144 @@
+import { useState, useRef, useCallback } from 'react'
+import mapboxgl from 'mapbox-gl'
+import { Button } from '@/components/ui/button'
+import { Navigation, MapPin } from 'lucide-react'
+import MapView from '@/components/MapView'
+import AutocompleteInput from '@/components/AutocompleteInput'
+import ElevationChart from '@/components/ElevationChart'
+import Toast from '@/components/Toast'
+import { formatDuration, formatDistance } from '@/utils/format'
+import {
+  sampleCoords, sampleByTime,
+  fetchWeatherData, fetchElevationData,
+  processElevation, getNotableWaypoints, getConditionCallout,
+} from '@/utils/weatherElevation'
+
+mapboxgl.accessToken = import.meta.env.VITE_MAPBOX_TOKEN
+const TOKEN = import.meta.env.VITE_MAPBOX_TOKEN
+
+// ── Design tokens ──────────────────────────────────────────────
+const C = {
+  pageBg:    '#0d0f14',
+  sidebarBg: '#13161e',
+  cardBg:    '#1a1e28',
+  elevated:  '#222736',
+  borderPri: 'rgba(255,255,255,0.07)',
+  borderSec: 'rgba(255,255,255,0.12)',
+  textPri:   '#f0f2f7',
+  textSec:   '#8b90a0',
+  textMuted: '#555b6e',
+  accent:    '#00d4aa',
+  riskLow:   '#00d4aa',
+  riskMid:   '#f5a623',
+  riskHigh:  '#ff4757',
+}
+
+const mono = "'DM Mono', monospace"
+
+// Format a Date as the value required by <input type="datetime-local">
+function toDatetimeLocal(date) {
+  const pad = (n) => String(n).padStart(2, '0')
+  return (
+    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}` +
+    `T${pad(date.getHours())}:${pad(date.getMinutes())}`
+  )
+}
+
+const RISK_FACTORS = [
+  { label: 'Precipitation', weight: 35 },
+  { label: 'Elevation',     weight: 25 },
+  { label: 'Visibility',    weight: 20 },
+  { label: 'Wind',          weight: 10 },
+  { label: 'Temperature',   weight: 10 },
+]
+
+// ── Risk / condition colour helpers ───────────────────────────
+function scoreColor(score) {
+  if (score <= 30) return C.riskLow
+  if (score <= 60) return C.riskMid
+  return C.riskHigh
+}
+
+function waypointRiskColor(pt) {
+  if (pt.windMph > 30 || pt.precipMm > 1)   return C.riskHigh
+  if (pt.windMph > 20 || pt.precipMm > 0.1) return C.riskMid
+  return C.accent
+}
+
+// ── Elevation gain in a ±windowMiles window around a route fraction ──
+function localElevGain(elevFeet, distanceLabels, centerFraction, windowMiles = 30) {
+  if (!elevFeet || !distanceLabels) return 0
+  const totalMiles  = parseFloat(distanceLabels[distanceLabels.length - 1])
+  const centerMile  = centerFraction * totalMiles
+  const half        = windowMiles / 2
+  let gain = 0
+  for (let i = 1; i < elevFeet.length; i++) {
+    const mile = parseFloat(distanceLabels[i])
+    if (mile < centerMile - half || mile > centerMile + half) continue
+    const diff = elevFeet[i] - elevFeet[i - 1]
+    if (diff > 0) gain += diff
+  }
+  return gain
+}
+
+// ── Reverse geocode a coordinate to its nearest city name ────
+async function fetchCityName(lng, lat) {
+  try {
+    const res = await fetch(
+      `https://api.mapbox.com/geocoding/v5/mapbox.places/${lng},${lat}.json` +
+      `?types=place&access_token=${TOKEN}`
+    )
+    if (!res.ok) return null
+    const data = await res.json()
+    return data.features?.[0]?.text ?? null
+  } catch {
+    return null
+  }
+}
+
+// ── Generate Route Alerts from weather + elevation data ───────
+function generateAlerts(weatherPoints, cityNames, elevation) {
+  const alerts = []
+  const seen   = new Set()
+  const n      = weatherPoints.length
+
+  weatherPoints.forEach((pt, i) => {
+    const city     = cityNames[i] || 'this location'
+    const time     = formatTimeline(pt.timeSeconds)
+    const fraction = n > 1 ? i / (n - 1) : 0
+
+    if (!seen.has('rain') && pt.precipMm > 0.1) {
+      seen.add('rain')
+      const gain    = localElevGain(elevation?.elevFeet, elevation?.distanceLabels, fraction)
+      const context = gain > 200
+        ? 'wet road on a descent — reduce speed'
+        : 'allow extra following distance'
+      alerts.push({
+        type: 'rain', emoji: '🌧️',
+        title:    `Rain at ${time}`,
+        subtitle: `${pt.label} near ${city} — ${context}`,
+        meta:     `${time} · ${city}`,
+      })
+    }
+
+    if (!seen.has('wind') && pt.windMph > 20) {
+      seen.add('wind')
+      alerts.push({
+        type: 'wind', emoji: '💨',
+        title:    `Strong winds at ${time}`,
+        subtitle: `${pt.windMph} mph near ${city} — allow extra space when overtaking`,
+        meta:     `${time} · ${city}`,
+      })
+    }
+
+    if (!seen.has('freeze') && pt.tempF < 35) {
+      seen.add('freeze')
+      alerts.push({
+        type: 'freeze', emoji: '🧊',
+        title:    `Freezing risk at ${time}`,
+        subtitle: `Temperature drops to ${pt.tempF}°F near ${city} — watch for black ice on bridges and elevated sections`,
+        meta:     `${time} · ${city}`,
+      })
+    }
+
+    if (!seen.has('vis') && pt.visibilityMi < 3) {
+      seen.add('vis')
+      alerts.push({
+        type: 'vis', emoji: '🌫️',
+        title:    `Low visibility at ${time}`,
+        subtitle: `${pt.visibilityMi} mi visibility near ${city} — use fog lights and reduce speed`,
+        meta:     `${time} · ${city}`,
+      })
+    }
+  })
+
+  if (alerts.length === 0) {
+    alerts.push({
+      type: 'clear', emoji: '✅',
+      title:    'All clear',
+      subtitle: 'No significant weather concerns along this route.',
+      meta:     null,
+    })
+  }
+  return alerts
+}
+
+// ── Sample ≤ maxMarkers evenly-spaced points for map display ──
+function sampleMarkersToShow(points, max = 8) {
+  if (points.length <= max) return points
+  return Array.from({ length: max }, (_, i) =>
+    points[Math.round((i / (max - 1)) * (points.length - 1))]
+  )
+}
+
+// ── Risk score interpolation ──────────────────────────────────
+function interpolateScore(value, breakpoints) {
+  if (value <= breakpoints[0][0])                       return breakpoints[0][1]
+  if (value >= breakpoints[breakpoints.length - 1][0]) return breakpoints[breakpoints.length - 1][1]
+  for (let i = 0; i < breakpoints.length - 1; i++) {
+    const [v0, s0] = breakpoints[i]
+    const [v1, s1] = breakpoints[i + 1]
+    if (value >= v0 && value <= v1) return s0 + (s1 - s0) * (value - v0) / (v1 - v0)
+  }
+  return 0
+}
+
+function calculateRiskScore(weatherPoints, elevation) {
+  if (!weatherPoints?.length) return null
+
+  const maxPrecipMm  = Math.max(...weatherPoints.map(p => p.precipMm))
+  const minVisMi     = Math.min(...weatherPoints.map(p => p.visibilityMi))
+  const maxWindMph   = Math.max(...weatherPoints.map(p => p.windMph))
+  const minTempF     = Math.min(...weatherPoints.map(p => p.tempF))
+  // Convert gain from feet back to meters
+  const gainFt       = parseFloat((elevation?.gainFt ?? '0').replace(/[^0-9.]/g, '')) || 0
+  const gainM        = gainFt / 3.281
+
+  const precip = interpolateScore(maxPrecipMm, [
+    [0, 0], [0.5, 20], [1, 35], [2, 55], [3, 70], [5, 85], [8, 100],
+  ])
+  const elev = interpolateScore(gainM, [
+    [0, 0], [300, 15], [700, 35], [1200, 55], [1800, 72], [2500, 85], [3500, 100],
+  ])
+  const vis = interpolateScore(minVisMi, [
+    [0.25, 100], [1, 80], [2, 60], [5, 35], [10, 15], [20, 5], [47, 0],
+  ])
+  const wind = interpolateScore(maxWindMph, [
+    [0, 0], [10, 8], [20, 20], [30, 38], [45, 60], [60, 80], [75, 100],
+  ])
+  const temp = interpolateScore(minTempF, [
+    [0, 100], [10, 90], [20, 78], [28, 60], [32, 40], [35, 15], [40, 0],
+  ])
+
+  const total = Math.min(100, Math.max(0, Math.round(
+    precip * 0.35 + elev * 0.25 + vis * 0.20 + wind * 0.10 + temp * 0.10
+  )))
+
+  return {
+    total,
+    scores: {
+      Precipitation: Math.round(precip),
+      Elevation:     Math.round(elev),
+      Visibility:    Math.round(vis),
+      Wind:          Math.round(wind),
+      Temperature:   Math.round(temp),
+    },
+  }
+}
+
+function riskLabel(total) {
+  if (total <= 30) return 'Low risk'
+  if (total <= 60) return 'Moderate risk'
+  if (total <= 80) return 'Elevated risk'
+  return 'High risk'
+}
+
+function getRiskExplanation(scores) {
+  if (!scores) return null
+  const top = Object.entries(scores).sort((a, b) => b[1] - a[1])[0]
+  if (!top || top[1] <= 40) return 'Conditions look good. Standard safe driving applies.'
+  return {
+    Precipitation: 'Rain is the main concern on this route — wet roads increase stopping distance.',
+    Elevation:     'Significant elevation change — watch speed on descents, especially in wet conditions.',
+    Visibility:    'Reduced visibility detected — use headlights and increase following distance.',
+    Wind:          'Strong winds along the route — be cautious when overtaking large vehicles.',
+    Temperature:   'Near-freezing temperatures — watch for black ice especially on bridges.',
+  }[top[0]] ?? 'Conditions look good. Standard safe driving applies.'
+}
+
+// ── Shared UI primitives ──────────────────────────────────────
+const SectionLabel = ({ children }) => (
+  <p style={{ fontSize: 10, fontWeight: 600, letterSpacing: '0.1em', textTransform: 'uppercase', color: C.textMuted }}>
+    {children}
+  </p>
+)
+const Divider = () => (
+  <div style={{ height: 1, background: C.borderPri, flexShrink: 0 }} />
+)
+
+// ── Time label for timeline (e.g. "0 min", "45 min", "1h 30m") ──
+function formatTimeline(seconds) {
+  if (seconds === 0) return '0 min'
+  const h = Math.floor(seconds / 3600)
+  const m = Math.round((seconds % 3600) / 60)
+  if (h === 0) return `${m} min`
+  if (m === 0) return `${h}h`
+  return `${h}h ${m}m`
+}
+
+// ── Clock time from departure + offset (e.g. "2:45 PM") ──
+function formatClockTime(departureStr, offsetSeconds) {
+  const base = new Date(departureStr)
+  if (isNaN(base)) return ''
+  const arrival = new Date(base.getTime() + offsetSeconds * 1000)
+  return arrival.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+}
+
+// ── Map element creators ──────────────────────────────────────
+function createRouteMarkerEl(label) {
+  const el = document.createElement('div')
+  Object.assign(el.style, {
+    width: '28px', height: '28px', borderRadius: '50%',
+    background: '#00d4aa', color: '#000',
+    fontFamily: "'DM Sans', sans-serif",
+    fontSize: '12px', fontWeight: '600',
+    display: 'flex', alignItems: 'center', justifyContent: 'center',
+    boxShadow: '0 2px 12px rgba(0,212,170,0.5)',
+    border: '2px solid rgba(0,0,0,0.2)',
+    userSelect: 'none', cursor: 'default',
+  })
+  el.textContent = label
+  return el
+}
+
+function createElevHoverEl() {
+  const wrap = document.createElement('div')
+  wrap.style.cssText = 'position:relative;width:14px;height:14px;pointer-events:none;'
+  const ring = document.createElement('div')
+  ring.style.cssText = [
+    'position:absolute;width:24px;height:24px;border-radius:50%;',
+    'background:rgba(245,166,35,0.35);top:-5px;left:-5px;',
+    'animation:pc-pulse-amber 1s ease-in-out infinite;',
+  ].join('')
+  const dot = document.createElement('div')
+  dot.style.cssText = 'position:absolute;width:14px;height:14px;border-radius:50%;background:#f5a623;top:0;left:0;'
+  wrap.appendChild(ring)
+  wrap.appendChild(dot)
+  return wrap
+}
+
+function createWeatherPillEl(emoji) {
+  const el = document.createElement('div')
+  el.style.cssText = [
+    'background:white;border:1px solid rgba(0,0,0,0.15);',
+    'padding:2px 6px;border-radius:99px;font-size:14px;',
+    'cursor:default;user-select:none;line-height:1.3;',
+    'white-space:nowrap;',
+  ].join('')
+  el.textContent = emoji
+  return el
+}
+
+function weatherPopupHtml(pt) {
+  return [
+    '<div style="background:#13161e;border:1px solid rgba(255,255,255,0.12);',
+    'border-radius:8px;padding:8px 10px;font-family:\'DM Sans\',sans-serif;',
+    'font-size:12px;color:#f0f2f7;box-shadow:0 4px 20px rgba(0,0,0,0.6);min-width:130px;">',
+    `<div style="font-weight:500;margin-bottom:4px">${pt.emoji} ${pt.label}</div>`,
+    `<div style="color:#8b90a0;line-height:1.6">`,
+    `${pt.tempF}°F<br>`,
+    `${pt.windMph} mph wind<br>`,
+    `${pt.precipIn > 0 ? pt.precipIn + ' in precip.' : 'No precipitation'}`,
+    `</div></div>`,
+  ].join('')
+}
+
+// ── Route drawing ──────────────────────────────────────────────
+function drawRoutesOnMap(map, routeData, activeIdx, markers) {
+  markers.forEach(m => m.remove())
+  markers.length = 0
+  for (let i = 0; i < 2; i++) {
+    if (map.getLayer(`route-layer-${i}`)) map.removeLayer(`route-layer-${i}`)
+    if (map.getSource(`route-${i}`))      map.removeSource(`route-${i}`)
+  }
+  const order = routeData.length === 2
+    ? (activeIdx === 0 ? [1, 0] : [0, 1])
+    : [0]
+  order.forEach(i => {
+    if (!routeData[i]) return
+    const isActive = i === activeIdx
+    map.addSource(`route-${i}`, {
+      type: 'geojson',
+      data: { type: 'Feature', properties: {}, geometry: routeData[i].geometry },
+    })
+    const paint = {
+      'line-color': isActive ? '#00d4aa' : '#555b6e',
+      'line-width': isActive ? 5 : 3,
+    }
+    if (!isActive) paint['line-dasharray'] = [2, 2]
+    map.addLayer({
+      id: `route-layer-${i}`,
+      type: 'line',
+      source: `route-${i}`,
+      layout: { 'line-join': 'round', 'line-cap': 'round' },
+      paint,
+    })
+  })
+}
+
+// ── Add weather waypoint pill markers ─────────────────────────
+function addWeatherMarkersToMap(map, weatherPoints, storeArr) {
+  weatherPoints.forEach(pt => {
+    const el = createWeatherPillEl(pt.emoji)
+    const popup = new mapboxgl.Popup({
+      closeButton: false,
+      offset: 12,
+      className: 'weather-popup',
+      focusAfterOpen: false,
+    }).setLngLat(pt.coords).setHTML(weatherPopupHtml(pt))
+
+    el.addEventListener('mouseenter', () => popup.addTo(map))
+    el.addEventListener('mouseleave', () => popup.remove())
+
+    const marker = new mapboxgl.Marker({ element: el, anchor: 'bottom' })
+      .setLngLat(pt.coords)
+      .addTo(map)
+
+    // Attach popup ref so we can clean it up later
+    marker._popup = popup
+    storeArr.push(marker)
+  })
+}
+
+// ── Main component ────────────────────────────────────────────
+export default function App() {
+  // Input state
+  const [originText,   setOriginText]   = useState('')
+  const [destText,     setDestText]     = useState('')
+  const [originCoords, setOriginCoords] = useState(null)
+  const [destCoords,   setDestCoords]   = useState(null)
+
+  // Departure time — only active when useScheduled is true
+  const [useScheduled,  setUseScheduled]  = useState(false)
+  const [departureTime, setDepartureTime] = useState(() => toDatetimeLocal(new Date()))
+
+  // Route state
+  const [routes,         setRoutes]         = useState([])
+  const [activeRouteIdx, setActiveRouteIdx] = useState(0)
+  const [loading,        setLoading]        = useState(false)
+  const [toast,          setToast]          = useState(null)
+
+  // Conditions state — one entry per route index, filled in parallel after Find Route
+  const [allConditions,     setAllConditions]     = useState([])   // conditions[routeIdx]
+  const [allRiskScores,     setAllRiskScores]     = useState([])   // {total,scores}[routeIdx]
+  const [allAlerts,         setAllAlerts]         = useState([])   // alerts[][routeIdx]
+  const [conditionsLoading, setConditionsLoading] = useState(false)
+  const [loadingPhase,      setLoadingPhase]      = useState(null) // 'weather'|'elevation'|null
+
+  // Stable refs
+  const mapRef              = useRef(null)
+  const markersRef          = useRef([])    // route A/B endpoint markers
+  const weatherMarkersRef   = useRef([])    // 45-min weather pill markers
+  const elevHoverMarkerRef  = useRef(null)  // pulsing elevation hover marker
+  const routesRef           = useRef([])
+  const allConditionsRef    = useRef([])    // mirrors allConditions for use in callbacks
+  const originCoordsRef     = useRef(null)
+  const destCoordsRef       = useRef(null)
+  const activeRouteIdxRef   = useRef(0)
+
+  // ── Map ready ──
+  const handleMapReady = useCallback((map) => { mapRef.current = map }, [])
+
+  // ── Clear weather pill markers ──
+  function clearWeatherMarkers() {
+    weatherMarkersRef.current.forEach(m => {
+      m._popup?.remove()
+      m.remove()
+    })
+    weatherMarkersRef.current = []
+  }
+
+  // ── Clear elevation hover marker ──
+  function clearElevHoverMarker() {
+    if (elevHoverMarkerRef.current) {
+      elevHoverMarkerRef.current.remove()
+      elevHoverMarkerRef.current = null
+    }
+  }
+
+  // ── Load conditions for ALL routes simultaneously ────────────
+  // Fetches weather then elevation for every route in parallel,
+  // so both cards are scored immediately — no second fetch on route switch.
+  async function loadAllConditions(routes, deptDate = new Date()) {
+    setConditionsLoading(true)
+    setAllConditions([])
+    setAllRiskScores([])
+    setAllAlerts([])
+    allConditionsRef.current = []
+    clearWeatherMarkers()
+    clearElevHoverMarker()
+    try {
+      // Pre-compute sample arrays for every route
+      const meta = routes.map(r => ({
+        coords:             r.geometry.coordinates,
+        totalDistanceMiles: r.distance / 1609.344,
+        elevSamples:        sampleCoords(r.geometry.coordinates, 80),
+        timePoints:         sampleByTime(r.geometry.coordinates, r.duration),
+      }))
+
+      // Phase 1 — weather for all routes in parallel
+      setLoadingPhase('weather')
+      const allWeatherPoints = await Promise.all(
+        meta.map(m => fetchWeatherData(m.timePoints, deptDate))
+      )
+
+      // Phase 2 — elevation for all routes in parallel
+      setLoadingPhase('elevation')
+      const allElevMeters = await Promise.all(
+        meta.map(m => fetchElevationData(m.elevSamples))
+      )
+
+      // Reverse-geocode all waypoints across all routes in parallel
+      const allCityNames = await Promise.all(
+        allWeatherPoints.map(pts =>
+          Promise.all(pts.map(pt => fetchCityName(pt.coords[0], pt.coords[1])))
+        )
+      )
+
+      // Assemble per-route condition objects
+      const results = meta.map((m, i) => {
+        const elevation    = processElevation(allElevMeters[i], m.totalDistanceMiles)
+        const weatherPoints = allWeatherPoints[i]
+        return {
+          elevation,
+          weatherPoints,
+          notable: getNotableWaypoints(weatherPoints),
+          callout: getConditionCallout(weatherPoints),
+        }
+      })
+
+      const rsList   = results.map(r => calculateRiskScore(r.weatherPoints, r.elevation))
+      const alertList = results.map((r, i) => generateAlerts(r.weatherPoints, allCityNames[i], r.elevation))
+
+      setAllConditions(results)
+      allConditionsRef.current = results
+      setAllRiskScores(rsList)
+      setAllAlerts(alertList)
+
+      // Show weather markers for whichever route is currently active
+      const map = mapRef.current
+      const activeResult = results[activeRouteIdxRef.current]
+      if (map && activeResult) {
+        addWeatherMarkersToMap(
+          map,
+          sampleMarkersToShow(activeResult.weatherPoints, 8),
+          weatherMarkersRef.current
+        )
+      }
+    } catch {
+      setToast('Weather data temporarily unavailable')
+    } finally {
+      setConditionsLoading(false)
+      setLoadingPhase(null)
+    }
+  }
+
+  // ── Find Route ──
+  async function handleFindRoute() {
+    const org = originCoordsRef.current
+    const dst = destCoordsRef.current
+    if (!org || !dst) return
+
+    setLoading(true)
+    setRoutes([])
+    setAllConditions([])
+    setAllRiskScores([])
+    setAllAlerts([])
+    allConditionsRef.current = []
+    routesRef.current = []
+    clearWeatherMarkers()
+    clearElevHoverMarker()
+
+    try {
+      const url =
+        `https://api.mapbox.com/directions/v5/mapbox/driving/` +
+        `${org[0]},${org[1]};${dst[0]},${dst[1]}` +
+        `?alternatives=true&geometries=geojson&overview=full&steps=false` +
+        `&access_token=${TOKEN}`
+
+      const res = await fetch(url)
+      if (!res.ok) throw new Error(`Route service error (${res.status})`)
+      const data = await res.json()
+      const fetched = (data.routes ?? []).slice(0, 2)
+      if (fetched.length === 0) throw new Error('No routes found between these locations')
+
+      setRoutes(fetched)
+      setActiveRouteIdx(0)
+      activeRouteIdxRef.current = 0
+      routesRef.current = fetched
+
+      const map = mapRef.current
+      if (map) {
+        drawRoutesOnMap(map, fetched, 0, markersRef.current)
+        const mA = new mapboxgl.Marker({ element: createRouteMarkerEl('A') }).setLngLat(org).addTo(map)
+        const mB = new mapboxgl.Marker({ element: createRouteMarkerEl('B') }).setLngLat(dst).addTo(map)
+        markersRef.current.push(mA, mB)
+        const bounds = new mapboxgl.LngLatBounds()
+        fetched.forEach(r => r.geometry.coordinates.forEach(c => bounds.extend(c)))
+        map.fitBounds(bounds, { padding: 80 })
+      }
+
+      await loadAllConditions(fetched, useScheduled ? new Date(departureTime) : new Date())
+    } catch (err) {
+      setToast(err.message || 'Failed to find routes')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  // ── Switch active route ──
+  function handleRouteSelect(idx) {
+    const map       = mapRef.current
+    const allRoutes = routesRef.current
+    if (!map || idx >= allRoutes.length || idx === activeRouteIdx) return
+
+    setActiveRouteIdx(idx)
+    activeRouteIdxRef.current = idx
+
+    const org = originCoordsRef.current
+    const dst = destCoordsRef.current
+    drawRoutesOnMap(map, allRoutes, idx, markersRef.current)
+    if (org && dst) {
+      const mA = new mapboxgl.Marker({ element: createRouteMarkerEl('A') }).setLngLat(org).addTo(map)
+      const mB = new mapboxgl.Marker({ element: createRouteMarkerEl('B') }).setLngLat(dst).addTo(map)
+      markersRef.current.push(mA, mB)
+    }
+
+    // Swap weather markers to those already fetched for this route — no re-fetch
+    clearWeatherMarkers()
+    clearElevHoverMarker()
+    const storedResult = allConditionsRef.current[idx]
+    if (map && storedResult) {
+      addWeatherMarkersToMap(
+        map,
+        sampleMarkersToShow(storedResult.weatherPoints, 8),
+        weatherMarkersRef.current
+      )
+    }
+  }
+
+  // ── Toggle scheduled departure on/off ──
+  function handleScheduleToggle(val) {
+    setUseScheduled(val)
+    // Sync the input to "now" whenever the user enables scheduling so it starts fresh
+    if (val) setDepartureTime(toDatetimeLocal(new Date()))
+    if (routesRef.current.length > 0) {
+      loadAllConditions(routesRef.current, new Date())
+    }
+  }
+
+  // ── Scheduled datetime input changed ──
+  function handleDepartureTimeChange(value) {
+    setDepartureTime(value)
+    if (routesRef.current.length > 0) {
+      loadAllConditions(routesRef.current, new Date(value))
+    }
+  }
+
+  // ── Coord sync ──
+  function handleOriginSelect(coords) { setOriginCoords(coords); originCoordsRef.current = coords }
+  function handleDestSelect(coords)   { setDestCoords(coords);   destCoordsRef.current   = coords }
+  function handleOriginClear()        { setOriginCoords(null);   originCoordsRef.current  = null  }
+  function handleDestClear()          { setDestCoords(null);     destCoordsRef.current    = null  }
+
+  // ── Elevation chart hover → map marker ──
+  // Uses only refs, so useCallback with [] is safe and keeps identity stable
+  const handleElevHover = useCallback((idx) => {
+    const map        = mapRef.current
+    const route      = routesRef.current[activeRouteIdxRef.current]
+    const routeCoords = route?.geometry.coordinates
+
+    if (!map || !routeCoords || idx === null) {
+      clearElevHoverMarker()
+      return
+    }
+
+    const fraction = idx / 79  // 80 samples → index 0..79
+    const coordIdx = Math.min(
+      Math.round(fraction * (routeCoords.length - 1)),
+      routeCoords.length - 1
+    )
+    const lngLat = routeCoords[coordIdx]
+
+    if (elevHoverMarkerRef.current) {
+      elevHoverMarkerRef.current.setLngLat(lngLat)
+    } else {
+      elevHoverMarkerRef.current = new mapboxgl.Marker({
+        element: createElevHoverEl(),
+        anchor:  'center',
+      }).setLngLat(lngLat).addTo(map)
+    }
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const canSearch = !!(originCoords && destCoords)
+
+  // Derive per-active-route values from the per-route arrays
+  const conditions      = allConditions[activeRouteIdx] ?? null
+  const riskScore       = allRiskScores[activeRouteIdx] ?? null
+  const alerts          = allAlerts[activeRouteIdx]     ?? []
+  const routeRiskScores = { 0: allRiskScores[0]?.total, 1: allRiskScores[1]?.total }
+
+  const elev = conditions?.elevation
+  const dim  = conditionsLoading ? 0.45 : 1
+  // Departure string used purely for display (formatClockTime in the timeline)
+  const displayDeptStr = useScheduled ? departureTime : toDatetimeLocal(new Date())
+
+  // ── Render ────────────────────────────────────────────────
+  return (
+    <div style={{ display: 'flex', height: '100vh', width: '100vw', overflow: 'hidden', background: C.pageBg }}>
+
+      {/* ── Left Sidebar ─────────────────────────────────────── */}
+      <aside
+        className="sidebar-scroll"
+        style={{
+          width: 380, flexShrink: 0, display: 'flex', flexDirection: 'column',
+          overflowY: 'auto', background: C.sidebarBg,
+          borderRight: `1px solid ${C.borderPri}`,
+        }}
+      >
+        {/* Logo */}
+        <header style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '18px 20px', borderBottom: `1px solid ${C.borderPri}`, flexShrink: 0 }}>
+          <span style={{ width: 8, height: 8, borderRadius: '50%', background: C.accent, boxShadow: `0 0 10px ${C.accent}`, flexShrink: 0 }} />
+          <div>
+            <h1 style={{ fontSize: 16, fontWeight: 600, color: C.textPri, lineHeight: 1.2 }}>Pathcast</h1>
+            <p style={{ fontSize: 12, color: C.textSec, marginTop: 1 }}>Weather-intelligent routing</p>
+          </div>
+        </header>
+
+        {/* ── Route Inputs ── */}
+        <section style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 12, flexShrink: 0 }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <SectionLabel>Start</SectionLabel>
+            <AutocompleteInput
+              placeholder="Enter starting location"
+              value={originText}
+              onChange={setOriginText}
+              onSelect={handleOriginSelect}
+              onClearCoords={handleOriginClear}
+              iconEl={<MapPin size={14} style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', color: C.accent, zIndex: 1 }} />}
+            />
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <SectionLabel>Destination</SectionLabel>
+            <AutocompleteInput
+              placeholder="Enter destination"
+              value={destText}
+              onChange={setDestText}
+              onSelect={handleDestSelect}
+              onClearCoords={handleDestClear}
+              iconEl={<MapPin size={14} style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', color: C.riskHigh, zIndex: 1 }} />}
+            />
+          </div>
+          <Button
+            className="w-full"
+            disabled={!canSearch || loading}
+            onClick={handleFindRoute}
+            style={loading ? { animation: 'pc-pulse-btn 1.2s ease-in-out infinite' } : {}}
+          >
+            {loading ? 'Analyzing route...' : 'Find Route'}
+          </Button>
+        </section>
+
+        <Divider />
+
+        {/* ── Departure Time ── */}
+        <section style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 10, flexShrink: 0 }}>
+          <SectionLabel>Departure Time</SectionLabel>
+
+          {/* Toggle row */}
+          <div
+            onClick={() => handleScheduleToggle(!useScheduled)}
+            style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer', userSelect: 'none' }}
+          >
+            {/* Pill */}
+            <div style={{
+              width: 32, height: 18, borderRadius: 99, flexShrink: 0,
+              background: useScheduled ? C.accent : C.elevated,
+              position: 'relative', transition: 'background 0.2s',
+            }}>
+              <div style={{
+                position: 'absolute', top: 3,
+                left: useScheduled ? 17 : 3,
+                width: 12, height: 12, borderRadius: '50%',
+                background: '#fff', transition: 'left 0.2s',
+              }} />
+            </div>
+            <span style={{ fontSize: 12, color: useScheduled ? C.textPri : C.textMuted }}>
+              Schedule departure
+            </span>
+          </div>
+
+          {/* Datetime input — only visible when scheduling is on */}
+          {useScheduled && (
+            <input
+              type="datetime-local"
+              value={departureTime}
+              onChange={(e) => handleDepartureTimeChange(e.target.value)}
+              style={{
+                width: '100%',
+                background: C.cardBg,
+                border: `1px solid ${C.borderSec}`,
+                borderRadius: 8,
+                color: C.textPri,
+                fontFamily: "'DM Sans', sans-serif",
+                fontSize: 13,
+                padding: '8px 10px',
+                colorScheme: 'dark',
+              }}
+            />
+          )}
+        </section>
+
+        <Divider />
+
+        {/* ── Route Comparison ── */}
+        {(() => {
+          // Determine which route has the lower (better) risk score
+          const sA = routeRiskScores[0], sB = routeRiskScores[1]
+          const bestIdx = (sA === undefined && sB === undefined) ? -1
+                        : sA === undefined ? 1
+                        : sB === undefined ? 0
+                        : sA <= sB ? 0 : 1
+
+          // Trade-off text (only when both routes are loaded with scores)
+          let tradeoffText = null
+          if (sA !== undefined && sB !== undefined && routes.length === 2) {
+            const ptDiff  = Math.abs(sA - sB)
+            const minDiff = Math.round(Math.abs(routes[0].duration - routes[1].duration) / 60)
+            const saferName  = sA <= sB ? 'Route A' : 'Route B'
+            const saferIdx   = sA <= sB ? 0 : 1
+            const slowerIdx  = routes[0].duration >= routes[1].duration ? 0 : 1
+            if (ptDiff > 0) {
+              tradeoffText = saferIdx === slowerIdx
+                ? `${saferName} is ${ptDiff} points safer but ${minDiff} min longer`
+                : `${saferName} is ${ptDiff} points safer`
+            }
+          }
+
+          return (
+            <section style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 8, flexShrink: 0 }}>
+              <SectionLabel>Route Comparison</SectionLabel>
+              {[0, 1].map(i => {
+                if (routes.length > 0 && i >= routes.length) return null
+                const isActive  = i === activeRouteIdx
+                const route     = routes[i] ?? null
+                const score     = routeRiskScores[i]
+                const isBest    = bestIdx === i && routes.length > 0
+                const barColor  = score !== undefined ? scoreColor(score) : C.riskLow
+                return (
+                  <div
+                    key={i}
+                    onClick={() => handleRouteSelect(i)}
+                    style={{
+                      background: C.cardBg, borderRadius: 12, padding: '10px 12px',
+                      border: `1px solid ${C.borderPri}`,
+                      boxShadow: isActive && routes.length > 0 ? `inset 3px 0 0 ${C.accent}` : 'none',
+                      cursor: routes.length > 0 ? 'pointer' : 'default',
+                      opacity: routes.length === 0 ? 0.5 : 1,
+                      transition: 'box-shadow 0.15s',
+                    }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+                        <span style={{ fontSize: 13, fontWeight: 500, color: C.textPri }}>
+                          {i === 0 ? 'Route A' : 'Route B'}
+                        </span>
+                        {isBest && (
+                          <span style={{ fontSize: 10, color: C.accent, background: 'rgba(0,212,170,0.15)', borderRadius: 99, padding: '2px 8px', fontWeight: 500 }}>
+                            Best
+                          </span>
+                        )}
+                      </div>
+                      <span style={{ fontFamily: mono, fontSize: 14, fontWeight: 500, color: score !== undefined ? scoreColor(score) : C.textMuted }}>
+                        {score !== undefined ? score : '--'}
+                      </span>
+                    </div>
+                    <p style={{ fontSize: 11, color: C.textMuted, marginBottom: 8 }}>
+                      {route
+                        ? `${formatDuration(route.duration)}  ·  ${formatDistance(route.distance)}`
+                        : '— · — · —'}
+                    </p>
+                    <div style={{ height: 4, background: C.elevated, borderRadius: 2 }}>
+                      <div style={{ height: '100%', width: score !== undefined ? `${score}%` : '0%', background: barColor, borderRadius: 2, transition: 'width 0.4s' }} />
+                    </div>
+                  </div>
+                )
+              })}
+              {tradeoffText && (
+                <p style={{ fontSize: 11, color: C.textMuted, marginTop: 2 }}>{tradeoffText}</p>
+              )}
+            </section>
+          )
+        })()}
+
+        <Divider />
+
+        {/* ── Risk Score ── */}
+        <section style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 12, flexShrink: 0 }}>
+          <SectionLabel>Risk Score</SectionLabel>
+          {(() => {
+            const total  = riskScore?.total
+            const color  = total !== undefined ? scoreColor(total) : C.textMuted
+            const label  = total !== undefined ? riskLabel(total)  : 'Select a route'
+            const expl   = getRiskExplanation(riskScore?.scores)
+            return (
+              <>
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
+                  <span style={{ fontFamily: mono, fontSize: 56, fontWeight: 300, color, lineHeight: 1 }}>
+                    {total !== undefined ? total : '--'}
+                  </span>
+                  <p style={{ fontSize: 11, fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase', color }}>
+                    {label}
+                  </p>
+                  <div style={{ width: '100%', height: 6, background: C.elevated, borderRadius: 3, marginTop: 4 }}>
+                    <div style={{ height: '100%', width: total !== undefined ? `${total}%` : '0%', background: color, borderRadius: 3, transition: 'width 0.4s' }} />
+                  </div>
+                </div>
+                {expl && (
+                  <p style={{ fontSize: 11, color: C.textSec, lineHeight: 1.5, textAlign: 'center' }}>{expl}</p>
+                )}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  {RISK_FACTORS.map(({ label: factorLabel }) => {
+                    const score    = riskScore?.scores?.[factorLabel] ?? 0
+                    const barColor = scoreColor(score)
+                    return (
+                      <div key={factorLabel} style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                        <span style={{ fontSize: 12, color: C.textMuted, width: 100, flexShrink: 0 }}>{factorLabel}</span>
+                        <div style={{ flex: 1, height: 3, background: C.elevated, borderRadius: 2 }}>
+                          <div style={{ height: '100%', width: `${score}%`, background: barColor, borderRadius: 2, transition: 'width 0.4s' }} />
+                        </div>
+                        <span style={{ fontFamily: mono, fontSize: 11, color: barColor, width: 24, textAlign: 'right', flexShrink: 0 }}>{score}</span>
+                      </div>
+                    )
+                  })}
+                </div>
+              </>
+            )
+          })()}
+        </section>
+
+        <Divider />
+
+        {/* ── ROUTE ALERTS ── */}
+        {(routes.length > 0 || conditionsLoading) && (
+          <>
+            <section style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 8, flexShrink: 0, opacity: dim, transition: 'opacity 0.25s' }}>
+              <SectionLabel>Route Alerts</SectionLabel>
+              {conditionsLoading ? (
+                <p style={{ fontSize: 12, color: C.textMuted }}>Analyzing weather data…</p>
+              ) : (
+                <div>
+                  {alerts.map((alert, i) => {
+                    const isClear  = alert.type === 'clear'
+                    const isFreeze = alert.type === 'freeze'
+                    const bg     = isClear  ? 'rgba(0,212,170,0.08)'  : isFreeze ? 'rgba(99,153,255,0.1)'  : 'rgba(245,166,35,0.1)'
+                    const border = isClear  ? C.accent                : isFreeze ? '#6399ff'               : C.riskMid
+                    return (
+                      <div key={i} style={{
+                        background: bg,
+                        borderLeft: `2px solid ${border}`,
+                        borderRadius: 8,
+                        padding: '8px 10px',
+                        marginBottom: i < alerts.length - 1 ? 6 : 0,
+                        display: 'flex',
+                        gap: 8,
+                      }}>
+                        <span style={{ fontSize: 14, flexShrink: 0, lineHeight: 1.2 }}>{alert.emoji}</span>
+                        <div style={{ minWidth: 0 }}>
+                          <p style={{ fontSize: 11, fontWeight: 600, color: C.textPri, marginBottom: 2 }}>
+                            {alert.title}
+                          </p>
+                          <p style={{ fontSize: 10, color: C.textSec, lineHeight: 1.4 }}>
+                            {alert.subtitle}
+                          </p>
+                          {alert.meta && (
+                            <p style={{ fontFamily: mono, fontSize: 9, color: C.textMuted, marginTop: 3 }}>
+                              {alert.meta}
+                            </p>
+                          )}
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+            </section>
+            <Divider />
+          </>
+        )}
+
+        {/* ── WEATHER TIMELINE ── */}
+        <section
+          style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 10, flexShrink: 0, opacity: dim, transition: 'opacity 0.25s' }}
+        >
+          <SectionLabel>Weather Timeline</SectionLabel>
+
+          {conditions?.weatherPoints ? (
+            <div
+              className="timeline-scroll"
+              style={{ maxHeight: 280, overflowY: 'auto' }}
+            >
+              {conditions.weatherPoints.map((pt, i) => {
+                const isLast = i === conditions.weatherPoints.length - 1
+                return (
+                  <div key={i} style={{ display: 'flex' }}>
+                    {/* Time label column */}
+                    <div style={{
+                      width: 52, flexShrink: 0,
+                      paddingRight: 10, paddingTop: 13,
+                      textAlign: 'right',
+                    }}>
+                      <span style={{ fontFamily: mono, fontSize: 11, color: C.textMuted, lineHeight: 1 }}>
+                        {formatTimeline(pt.timeSeconds)}
+                      </span>
+                    </div>
+
+                    {/* Spine: dot + vertical line */}
+                    <div style={{ width: 16, flexShrink: 0, position: 'relative' }}>
+                      {/* Dot */}
+                      <div style={{
+                        position: 'absolute', top: 15,
+                        left: '50%', transform: 'translateX(-50%)',
+                        width: 7, height: 7, borderRadius: '50%',
+                        background: C.accent,
+                      }} />
+                      {/* Connector line to next item */}
+                      {!isLast && (
+                        <div style={{
+                          position: 'absolute',
+                          top: 22, bottom: 0,
+                          left: '50%', transform: 'translateX(-50%)',
+                          width: 1,
+                          background: 'rgba(0,212,170,0.28)',
+                        }} />
+                      )}
+                    </div>
+
+                    {/* Weather card */}
+                    <div style={{ flex: 1, paddingLeft: 8, paddingBottom: isLast ? 0 : 8, paddingTop: 6 }}>
+                      <div style={{
+                        background: C.cardBg,
+                        border: `1px solid ${C.borderPri}`,
+                        borderLeft: `2px solid ${waypointRiskColor(pt)}`,
+                        borderRadius: 8,
+                        padding: '10px 12px',
+                      }}>
+                        <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 4 }}>
+                          <p style={{ fontSize: 13, color: C.textPri, fontWeight: 500 }}>
+                            {pt.emoji} {pt.label}
+                          </p>
+                          <span style={{ fontFamily: mono, fontSize: 10, color: C.textMuted, flexShrink: 0, marginLeft: 6 }}>
+                            {formatClockTime(displayDeptStr, pt.timeSeconds)}
+                          </span>
+                        </div>
+                        <p style={{ fontSize: 11, color: C.textSec, lineHeight: 1.5 }}>
+                          {pt.tempF}°F · {pt.windMph} mph · {pt.precipIn}in · {pt.visibilityMi}mi vis.
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                )
+              })}
+
+              {/* Arrived row */}
+              <div style={{ display: 'flex', alignItems: 'center', marginTop: 6 }}>
+                <div style={{ width: 52, flexShrink: 0, paddingRight: 10, textAlign: 'right' }}>
+                  <span style={{ fontFamily: mono, fontSize: 10, color: C.textMuted }}>
+                    {formatTimeline(routes[activeRouteIdx]?.duration ?? 0)}
+                  </span>
+                </div>
+                <div style={{ width: 16, flexShrink: 0, display: 'flex', justifyContent: 'center' }}>
+                  <MapPin size={11} style={{ color: C.riskHigh }} />
+                </div>
+                <div style={{ flex: 1, paddingLeft: 8, display: 'flex', alignItems: 'baseline', gap: 6 }}>
+                  <span style={{ fontSize: 11, color: C.textMuted }}>Arrived</span>
+                  {routes[activeRouteIdx] && (
+                    <span style={{ fontFamily: mono, fontSize: 10, color: C.textMuted }}>
+                      {formatClockTime(displayDeptStr, routes[activeRouteIdx].duration)}
+                    </span>
+                  )}
+                </div>
+              </div>
+            </div>
+          ) : (
+            <p style={{ fontSize: 12, color: C.textMuted }}>
+              {conditionsLoading
+                ? 'Fetching weather data…'
+                : 'Find a route to see weather conditions.'}
+            </p>
+          )}
+        </section>
+
+        <Divider />
+
+        {/* ── Navigation Handoff ── */}
+        <section style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 8, flexShrink: 0 }}>
+          <SectionLabel>Open In</SectionLabel>
+          <div style={{ display: 'flex', gap: 8 }}>
+            {['Google Maps', 'Apple Maps', 'Waze'].map((app) => (
+              <Button key={app} variant="outline" size="sm" style={{ flex: 1, fontSize: 12 }} disabled>
+                {app}
+              </Button>
+            ))}
+          </div>
+        </section>
+
+      </aside>
+
+      {/* ── Right Column ─────────────────────────────────────── */}
+      <main style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
+
+        {/* Map */}
+        <div style={{ flex: 1, position: 'relative', background: C.pageBg }}>
+          <MapView onMapReady={handleMapReady} />
+          {routes.length === 0 && !loading && (
+            <div style={{
+              position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column',
+              alignItems: 'center', justifyContent: 'center', gap: 12, pointerEvents: 'none',
+            }}>
+              <Navigation size={32} style={{ color: C.textPri, opacity: 0.15 }} />
+              <div style={{ textAlign: 'center' }}>
+                <p style={{ fontSize: 13, color: C.textMuted }}>Enter a route to see the map</p>
+                <p style={{ fontSize: 11, color: '#3a3f50', marginTop: 4 }}>Weather · Elevation · Risk score</p>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Elevation Panel */}
+        <div style={{
+          flexShrink: 0, height: 180,
+          background: C.sidebarBg, borderTop: `1px solid ${C.borderPri}`,
+          display: 'flex', flexDirection: 'column',
+          opacity: dim, transition: 'opacity 0.25s',
+        }}>
+          {/* Header */}
+          <div style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+            padding: '10px 20px', borderBottom: `1px solid ${C.borderPri}`, flexShrink: 0,
+          }}>
+            <SectionLabel>Elevation Profile</SectionLabel>
+            <div style={{ display: 'flex', gap: 20 }}>
+              {[['Gain', elev?.gainFt ?? '--'], ['Max', elev?.maxFt ?? '--'], ['Min', elev?.minFt ?? '--']].map(([stat, val]) => (
+                <div key={stat} style={{ display: 'flex', alignItems: 'baseline', gap: 5 }}>
+                  <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase', color: C.textMuted }}>{stat}</span>
+                  <span style={{ fontFamily: mono, fontSize: 12, fontWeight: 500, color: C.textSec }}>{val}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Chart */}
+          <div style={{ flex: 1, padding: '6px 16px 8px', minHeight: 0 }}>
+            {elev ? (
+              <ElevationChart
+                elevFeet={elev.elevFeet}
+                distanceLabels={elev.distanceLabels}
+                onHoverIdx={handleElevHover}
+              />
+            ) : (
+              <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                <p style={{ fontSize: 12, color: C.textMuted }}>
+                  {conditionsLoading ? 'Loading elevation data…' : 'Elevation profile will appear here'}
+                </p>
+              </div>
+            )}
+          </div>
+        </div>
+
+      </main>
+
+      <Toast message={toast} onDismiss={() => setToast(null)} />
+    </div>
+  )
+}
