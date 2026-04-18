@@ -9,6 +9,7 @@ export default function AutocompleteInput({
   onSelect,
   onClearCoords,
   iconEl,
+  inputStyle,   // optional extra styles forwarded to the <Input>
 }) {
   const [open, setOpen] = useState(false)
   const [hoveredIdx, setHoveredIdx] = useState(-1)
@@ -47,7 +48,7 @@ export default function AutocompleteInput({
     <div ref={containerRef} style={{ position: 'relative' }}>
       {iconEl}
       <Input
-        style={{ paddingLeft: 36 }}
+        style={{ paddingLeft: 36, ...inputStyle }}
         placeholder={placeholder}
         value={value}
         onChange={handleChange}
@@ -72,7 +73,7 @@ export default function AutocompleteInput({
           {suggestions.map((feature, idx) => (
             <div
               key={feature.id}
-              onMouseDown={() => handleSelect(feature)}
+              onPointerDown={() => handleSelect(feature)}
               onMouseEnter={() => setHoveredIdx(idx)}
               onMouseLeave={() => setHoveredIdx(-1)}
               style={{

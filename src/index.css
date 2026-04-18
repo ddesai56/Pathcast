@@ -82,6 +82,19 @@ body {
   z-index: 200;
 }
 
+/* Mobile: push Mapbox controls clear of the bottom-sheet peek and top bar */
+@media (max-width: 768px) {
+  /* Zoom buttons — sit above the 120px peek */
+  .mapboxgl-ctrl-bottom-right {
+    bottom: 140px !important;
+    right: 12px !important;
+  }
+  /* Attribution — tuck above peek as well */
+  .mapboxgl-ctrl-bottom-left {
+    bottom: 130px !important;
+  }
+}
+
 /* Timeline scrollable container */
 .timeline-scroll::-webkit-scrollbar       { width: 4px; }
 .timeline-scroll::-webkit-scrollbar-track { background: transparent; }

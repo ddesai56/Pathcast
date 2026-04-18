@@ -1,7 +1,7 @@
-import { useState, useRef, useCallback } from 'react'
+import { useState, useRef, useCallback, useEffect, useLayoutEffect } from 'react'
 import mapboxgl from 'mapbox-gl'
 import { Button } from '@/components/ui/button'
-import { Navigation, MapPin } from 'lucide-react'
+import { Navigation, MapPin, ChevronDown, ArrowUpDown } from 'lucide-react'
 import MapView from '@/components/MapView'
 import AutocompleteInput from '@/components/AutocompleteInput'
 import ElevationChart from '@/components/ElevationChart'
@@ -42,6 +42,18 @@ function toDatetimeLocal(date) {
     `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}` +
     `T${pad(date.getHours())}:${pad(date.getMinutes())}`
   )
+}
+
+// ── Bottom-sheet snap positions (mobile) ──────────────────────
+// Sheet is height:90dvh fixed at bottom:0. translateY moves it down.
+//   full  → translateY(0)           — 90 % of screen visible
+//   half  → translateY(40dvh px)    — 50 % visible
+//   peek  → translateY(90dvh-120px) — only 120 px visible
+function getSnapPx(pos) {
+  const h = window.innerHeight
+  if (pos === 'full') return 0
+  if (pos === 'half') return Math.round(h * 0.4)
+  return Math.round(h * 0.9 - 120)  // peek
 }
 
 const RISK_FACTORS = [
@@ -415,6 +427,11 @@ export default function App() {
   const [conditionsLoading, setConditionsLoading] = useState(false)
   const [loadingPhase,      setLoadingPhase]      = useState(null) // 'weather'|'elevation'|null
 
+  // ── Mobile UI state ──
+  const [isMobile,        setIsMobile]        = useState(() => window.innerWidth < 768)
+  const [topBarCollapsed, setTopBarCollapsed] = useState(false)
+  const [sheetPos,        setSheetPos]        = useState('peek') // 'peek'|'half'|'full'
+
   // Stable refs
   const mapRef              = useRef(null)
   const markersRef          = useRef([])    // route A/B endpoint markers
@@ -425,6 +442,9 @@ export default function App() {
   const originCoordsRef     = useRef(null)
   const destCoordsRef       = useRef(null)
   const activeRouteIdxRef   = useRef(0)
+  // Bottom-sheet drag state (mobile)
+  const sheetRef = useRef(null)
+  const dragRef  = useRef({ dragging: false, startY: 0, startTranslate: 0, lastY: 0, lastTime: 0, velocity: 0 })
 
   // ── Map ready ──
   const handleMapReady = useCallback((map) => { mapRef.current = map }, [])
@@ -660,6 +680,101 @@ export default function App() {
     }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
+  // ── Mobile: track window width ──
+  useEffect(() => {
+    const check = () => setIsMobile(window.innerWidth < 768)
+    window.addEventListener('resize', check)
+    return () => window.removeEventListener('resize', check)
+  }, [])
+
+  // ── Mobile: set initial sheet position without animation ──
+  useLayoutEffect(() => {
+    const el = sheetRef.current
+    if (!el) return
+    el.style.transition = 'none'
+    el.style.transform  = `translateY(${getSnapPx('peek')}px)`
+  }, []) // mount only
+
+  // ── Mobile: animate sheet when sheetPos state changes ──
+  useEffect(() => {
+    const el = sheetRef.current
+    if (!el) return
+    el.style.transition = 'transform 0.35s cubic-bezier(0.32,0.72,0,1)'
+    el.style.transform  = `translateY(${getSnapPx(sheetPos)}px)`
+  }, [sheetPos])
+
+  // ── Mobile: auto-snap to half after routes are found ──
+  useEffect(() => {
+    if (isMobile && routes.length > 0) setSheetPos('half')
+  }, [routes.length, isMobile]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Swap origin ↔ destination ──
+  function handleSwap() {
+    const tmpText   = originText
+    const tmpCoords = originCoordsRef.current
+    setOriginText(destText)
+    setDestText(tmpText)
+    setOriginCoords(destCoordsRef.current)
+    setDestCoords(tmpCoords)
+    originCoordsRef.current = destCoordsRef.current
+    destCoordsRef.current   = tmpCoords
+    // Re-fetch with swapped coords if a route is already displayed
+    if (routesRef.current.length > 0) handleFindRoute()
+  }
+
+  // ── Bottom-sheet touch drag ──
+  function handleSheetTouchStart(e) {
+    const dr  = dragRef.current
+    const el  = sheetRef.current
+    if (!el) return
+    const mat = new DOMMatrix(getComputedStyle(el).transform)
+    dr.dragging      = true
+    dr.startY        = e.touches[0].clientY
+    dr.startTranslate = mat.m42
+    dr.lastY         = e.touches[0].clientY
+    dr.lastTime      = Date.now()
+    dr.velocity      = 0
+    el.style.transition = 'none'
+  }
+
+  function handleSheetTouchMove(e) {
+    const dr = dragRef.current
+    if (!dr.dragging) return
+    e.preventDefault()
+    const now = Date.now()
+    const y   = e.touches[0].clientY
+    dr.velocity  = (y - dr.lastY) / Math.max(now - dr.lastTime, 1)
+    dr.lastY     = y
+    dr.lastTime  = now
+    const translate = Math.max(0, dr.startTranslate + (y - dr.startY))
+    sheetRef.current.style.transform = `translateY(${translate}px)`
+  }
+
+  function handleSheetTouchEnd() {
+    const dr = dragRef.current
+    if (!dr.dragging) return
+    dr.dragging = false
+    const el  = sheetRef.current
+    if (!el) return
+    const mat      = new DOMMatrix(getComputedStyle(el).transform)
+    const currentY = mat.m42
+    const snaps    = { full: 0, half: getSnapPx('half'), peek: getSnapPx('peek') }
+
+    let target
+    if (dr.velocity < -0.5) {
+      target = currentY > snaps.half ? 'half' : 'full'
+    } else if (dr.velocity > 0.5) {
+      target = currentY < snaps.half ? 'half' : 'peek'
+    } else {
+      target = Object.entries(snaps)
+        .map(([p, y]) => ({ p, d: Math.abs(currentY - y) }))
+        .sort((a, b) => a.d - b.d)[0].p
+    }
+    el.style.transition = 'transform 0.35s cubic-bezier(0.32,0.72,0,1)'
+    el.style.transform  = `translateY(${snaps[target]}px)`
+    setSheetPos(target)
+  }
+
   const canSearch = !!(originCoords && destCoords)
 
   // Derive per-active-route values from the per-route arrays
@@ -673,7 +788,381 @@ export default function App() {
   // Departure string used purely for display (formatClockTime in the timeline)
   const displayDeptStr = useScheduled ? departureTime : toDatetimeLocal(new Date())
 
-  // ── Render ────────────────────────────────────────────────
+  // ── Mobile render ─────────────────────────────────────────
+  if (isMobile) {
+    const mobileAlertBorder = (alert) =>
+      alert.type === 'clear' ? C.accent : alert.type === 'freeze' ? '#6399ff' : C.riskMid
+
+    return (
+      <div style={{ position: 'relative', width: '100vw', height: '100dvh', overflow: 'hidden', background: C.pageBg }}>
+
+        {/* ── Full-screen map ── */}
+        <div style={{ position: 'absolute', inset: 0 }}>
+          <MapView onMapReady={handleMapReady} />
+        </div>
+
+        {/* ── Top search bar ── */}
+        <div style={{
+          position: 'fixed', top: 0, left: 0, right: 0, zIndex: 200,
+          background: C.sidebarBg,
+          paddingTop: 'env(safe-area-inset-top, 0px)',
+          boxShadow: '0 2px 20px rgba(0,0,0,0.55)',
+        }}>
+          {/* Logo row + chevron */}
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 14px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ width: 8, height: 8, borderRadius: '50%', background: C.accent, boxShadow: `0 0 10px ${C.accent}`, flexShrink: 0 }} />
+              <span style={{ fontSize: 15, fontWeight: 600, color: C.textPri }}>Pathcast</span>
+            </div>
+            <button
+              onClick={() => setTopBarCollapsed(v => !v)}
+              style={{ background: 'none', border: 'none', color: C.textSec, cursor: 'pointer', padding: 8, display: 'flex', alignItems: 'center', justifyContent: 'center', minWidth: 44, minHeight: 44 }}
+            >
+              <ChevronDown size={18} style={{ transition: 'transform 0.2s', transform: topBarCollapsed ? 'rotate(0deg)' : 'rotate(180deg)' }} />
+            </button>
+          </div>
+
+          {/* Collapsible inputs */}
+          {!topBarCollapsed && (
+            <div style={{ padding: '0 14px 12px', display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {/* Origin */}
+              <div style={{ position: 'relative' }}>
+                <MapPin size={14} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: C.accent, zIndex: 1 }} />
+                <AutocompleteInput
+                  placeholder="Starting location"
+                  value={originText}
+                  onChange={setOriginText}
+                  onSelect={handleOriginSelect}
+                  onClearCoords={handleOriginClear}
+                  inputStyle={{ height: 36, fontSize: 13 }}
+                />
+              </div>
+
+              {/* Destination + swap */}
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                <div style={{ position: 'relative', flex: 1 }}>
+                  <MapPin size={14} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: C.riskHigh, zIndex: 1 }} />
+                  <AutocompleteInput
+                    placeholder="Destination"
+                    value={destText}
+                    onChange={setDestText}
+                    onSelect={handleDestSelect}
+                    onClearCoords={handleDestClear}
+                    inputStyle={{ height: 36, fontSize: 13 }}
+                  />
+                </div>
+                <button
+                  onClick={handleSwap}
+                  title="Swap"
+                  style={{ width: 36, height: 36, flexShrink: 0, borderRadius: 8, background: C.elevated, border: `1px solid ${C.borderPri}`, color: C.textSec, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                >
+                  <ArrowUpDown size={15} />
+                </button>
+              </div>
+
+              {/* Find Route */}
+              <Button
+                className="w-full"
+                disabled={!canSearch || loading}
+                onClick={handleFindRoute}
+                style={loading
+                  ? { minHeight: 44, animation: 'pc-pulse-btn 1.2s ease-in-out infinite' }
+                  : { minHeight: 44 }}
+              >
+                {loading ? 'Analyzing route…' : 'Find Route'}
+              </Button>
+            </div>
+          )}
+        </div>
+
+        {/* ── Bottom sheet ── */}
+        <div
+          ref={sheetRef}
+          style={{
+            position: 'fixed', left: 0, right: 0, bottom: 0,
+            height: '90dvh',
+            background: C.sidebarBg,
+            borderRadius: '16px 16px 0 0',
+            zIndex: 100,
+            willChange: 'transform',
+            display: 'flex', flexDirection: 'column',
+            overflow: 'hidden',
+          }}
+        >
+          {/* ── Drag-handle zone (non-scrollable) ── */}
+          <div
+            onTouchStart={handleSheetTouchStart}
+            onTouchMove={handleSheetTouchMove}
+            onTouchEnd={handleSheetTouchEnd}
+            style={{ flexShrink: 0, touchAction: 'none' }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'center', padding: '10px 0 6px' }}>
+              <div style={{ width: 40, height: 4, borderRadius: 2, background: 'rgba(255,255,255,0.2)' }} />
+            </div>
+
+            {/* Peek content */}
+            <div style={{ padding: '2px 16px 12px' }}>
+              {routes.length === 0 ? (
+                <p style={{ fontSize: 13, color: C.textSec, textAlign: 'center', paddingTop: 4 }}>
+                  {loading ? 'Finding routes…' : 'Search for a route to begin'}
+                </p>
+              ) : (
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <div>
+                    <p style={{ fontSize: 13, fontWeight: 500, color: C.textPri }}>
+                      {activeRouteIdx === 0 ? 'Route A' : 'Route B'}
+                      {routes[activeRouteIdx] && ` · ${formatDuration(routes[activeRouteIdx].duration)}`}
+                    </p>
+                    <p style={{ fontSize: 10, color: C.textMuted, marginTop: 2 }}>Swipe up for details</p>
+                  </div>
+                  {riskScore && (
+                    <span style={{ fontFamily: mono, fontSize: 22, fontWeight: 600, color: scoreColor(riskScore.total) }}>
+                      {riskScore.total}
+                    </span>
+                  )}
+                </div>
+              )}
+            </div>
+            <div style={{ height: 1, background: C.borderPri }} />
+          </div>
+
+          {/* ── Scrollable sheet body ── */}
+          <div
+            className="sidebar-scroll"
+            style={{
+              flex: 1,
+              overflowY: sheetPos === 'full' ? 'auto' : 'hidden',
+              padding: '14px 16px',
+              display: 'flex', flexDirection: 'column', gap: 14,
+            }}
+          >
+
+            {/* Route comparison (compact) */}
+            {(() => {
+              const sA = allRiskScores[0]?.total
+              const sB = allRiskScores[1]?.total
+              const bestIdx = (sA === undefined && sB === undefined) ? -1
+                : sA === undefined ? 1
+                : sB === undefined ? 0
+                : sA <= sB ? 0 : 1
+              return (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  <SectionLabel>Route Comparison</SectionLabel>
+                  {[0, 1].map(i => {
+                    if (routes.length > 0 && i >= routes.length) return null
+                    const isActive = i === activeRouteIdx
+                    const route    = routes[i] ?? null
+                    const score    = allRiskScores[i]?.total
+                    const isBest   = bestIdx === i && routes.length > 0
+                    const barColor = score !== undefined ? scoreColor(score) : C.riskLow
+                    return (
+                      <div
+                        key={i}
+                        onClick={() => handleRouteSelect(i)}
+                        style={{
+                          background: C.cardBg, borderRadius: 10, padding: '8px 10px',
+                          border: `1px solid ${C.borderPri}`,
+                          boxShadow: isActive && routes.length > 0 ? `inset 3px 0 0 ${C.accent}` : 'none',
+                          cursor: routes.length > 0 ? 'pointer' : 'default',
+                          opacity: routes.length === 0 ? 0.5 : 1,
+                          minHeight: 44,
+                        }}
+                      >
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                            <span style={{ fontSize: 12, fontWeight: 500, color: C.textPri }}>{i === 0 ? 'Route A' : 'Route B'}</span>
+                            {isBest && <span style={{ fontSize: 9, color: C.accent, background: 'rgba(0,212,170,0.15)', borderRadius: 99, padding: '1px 6px' }}>Best</span>}
+                          </div>
+                          <span style={{ fontFamily: mono, fontSize: 13, fontWeight: 500, color: score !== undefined ? scoreColor(score) : C.textMuted }}>
+                            {score !== undefined ? score : '--'}
+                          </span>
+                        </div>
+                        <p style={{ fontSize: 10, color: C.textMuted, marginBottom: 6 }}>
+                          {route ? `${formatDuration(route.duration)} · ${formatDistance(route.distance)}` : '— · —'}
+                        </p>
+                        <div style={{ height: 3, background: C.elevated, borderRadius: 2 }}>
+                          <div style={{ height: '100%', width: score !== undefined ? `${score}%` : '0%', background: barColor, borderRadius: 2, transition: 'width 0.4s' }} />
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              )
+            })()}
+
+            {/* Compact risk score */}
+            {(() => {
+              const total = riskScore?.total
+              const color = total !== undefined ? scoreColor(total) : C.textMuted
+              const label = total !== undefined ? riskLabel(total) : '--'
+              return (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  <SectionLabel>Risk Score</SectionLabel>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+                    <span style={{ fontFamily: mono, fontSize: 44, fontWeight: 300, color, lineHeight: 1 }}>
+                      {total !== undefined ? total : '--'}
+                    </span>
+                    <div style={{ flex: 1 }}>
+                      <p style={{ fontSize: 11, fontWeight: 600, color, letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 6 }}>{label}</p>
+                      <div style={{ height: 5, background: C.elevated, borderRadius: 3 }}>
+                        <div style={{ height: '100%', width: total !== undefined ? `${total}%` : '0%', background: color, borderRadius: 3, transition: 'width 0.4s' }} />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )
+            })()}
+
+            {/* ── Full content (only when sheet is fully open) ── */}
+            {sheetPos === 'full' ? (
+              <>
+                {/* Risk factor breakdown */}
+                {riskScore && (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    <SectionLabel>Risk Breakdown</SectionLabel>
+                    {RISK_FACTORS.map(({ label: fl }) => {
+                      const score    = riskScore?.scores?.[fl] ?? 0
+                      const barColor = scoreColor(score)
+                      return (
+                        <div key={fl} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                          <span style={{ fontSize: 11, color: C.textMuted, width: 88, flexShrink: 0 }}>{fl}</span>
+                          <div style={{ flex: 1, height: 3, background: C.elevated, borderRadius: 2 }}>
+                            <div style={{ height: '100%', width: `${score}%`, background: barColor, borderRadius: 2, transition: 'width 0.4s' }} />
+                          </div>
+                          <span style={{ fontFamily: mono, fontSize: 10, color: barColor, width: 22, textAlign: 'right', flexShrink: 0 }}>{score}</span>
+                        </div>
+                      )
+                    })}
+                  </div>
+                )}
+
+                {/* Route alerts (full, with subtitles) */}
+                {alerts.length > 0 && (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    <SectionLabel>Route Alerts</SectionLabel>
+                    {alerts.map((alert, i) => (
+                      <div key={i} style={{
+                        background: alert.type === 'clear' ? 'rgba(0,212,170,0.08)' : alert.type === 'freeze' ? 'rgba(99,153,255,0.1)' : 'rgba(245,166,35,0.1)',
+                        borderLeft: `2px solid ${mobileAlertBorder(alert)}`,
+                        borderRadius: 8, padding: '8px 10px', display: 'flex', gap: 8,
+                      }}>
+                        <span style={{ fontSize: 14, flexShrink: 0, lineHeight: 1.2 }}>{alert.emoji}</span>
+                        <div style={{ minWidth: 0 }}>
+                          <p style={{ fontSize: 11, fontWeight: 600, color: C.textPri, marginBottom: 2 }}>{alert.title}</p>
+                          <p style={{ fontSize: 10, color: C.textSec, lineHeight: 1.4 }}>{alert.subtitle}</p>
+                          {alert.meta && <p style={{ fontFamily: mono, fontSize: 9, color: C.textMuted, marginTop: 3 }}>{alert.meta}</p>}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Weather timeline */}
+                {conditions?.weatherPoints && (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    <SectionLabel>Weather Timeline</SectionLabel>
+                    {conditions.weatherPoints.map((pt, i) => {
+                      const isLast = i === conditions.weatherPoints.length - 1
+                      return (
+                        <div key={i} style={{ display: 'flex' }}>
+                          <div style={{ width: 48, flexShrink: 0, paddingRight: 8, paddingTop: 12, textAlign: 'right' }}>
+                            <span style={{ fontFamily: mono, fontSize: 10, color: C.textMuted }}>{formatTimeline(pt.timeSeconds)}</span>
+                          </div>
+                          <div style={{ width: 14, flexShrink: 0, position: 'relative' }}>
+                            <div style={{ position: 'absolute', top: 13, left: '50%', transform: 'translateX(-50%)', width: 6, height: 6, borderRadius: '50%', background: C.accent }} />
+                            {!isLast && <div style={{ position: 'absolute', top: 19, bottom: 0, left: '50%', transform: 'translateX(-50%)', width: 1, background: 'rgba(0,212,170,0.28)' }} />}
+                          </div>
+                          <div style={{ flex: 1, paddingLeft: 6, paddingBottom: isLast ? 0 : 6, paddingTop: 4 }}>
+                            <div style={{ background: C.cardBg, border: `1px solid ${C.borderPri}`, borderLeft: `2px solid ${waypointRiskColor(pt)}`, borderRadius: 8, padding: '8px 10px', minHeight: 44 }}>
+                              <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 2 }}>
+                                <p style={{ fontSize: 12, color: C.textPri, fontWeight: 500 }}>{pt.emoji} {pt.label}</p>
+                                <span style={{ fontFamily: mono, fontSize: 10, color: C.textMuted }}>{formatClockTime(displayDeptStr, pt.timeSeconds)}</span>
+                              </div>
+                              <p style={{ fontSize: 10, color: C.textSec }}>{pt.tempF}°F · {pt.windMph} mph · {pt.precipIn}in · {pt.visibilityMi}mi vis.</p>
+                            </div>
+                          </div>
+                        </div>
+                      )
+                    })}
+                    {/* Arrived */}
+                    <div style={{ display: 'flex', alignItems: 'center' }}>
+                      <div style={{ width: 48, flexShrink: 0, paddingRight: 8, textAlign: 'right' }}>
+                        <span style={{ fontFamily: mono, fontSize: 10, color: C.textMuted }}>{formatTimeline(routes[activeRouteIdx]?.duration ?? 0)}</span>
+                      </div>
+                      <div style={{ width: 14, flexShrink: 0, display: 'flex', justifyContent: 'center' }}>
+                        <MapPin size={10} style={{ color: C.riskHigh }} />
+                      </div>
+                      <div style={{ flex: 1, paddingLeft: 6, display: 'flex', alignItems: 'baseline', gap: 6 }}>
+                        <span style={{ fontSize: 11, color: C.textMuted }}>Arrived</span>
+                        {routes[activeRouteIdx] && (
+                          <span style={{ fontFamily: mono, fontSize: 10, color: C.textMuted }}>{formatClockTime(displayDeptStr, routes[activeRouteIdx].duration)}</span>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Elevation profile */}
+                {elev && (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                      <SectionLabel>Elevation Profile</SectionLabel>
+                      <div style={{ display: 'flex', gap: 14 }}>
+                        {[['Gain', elev.gainFt], ['Max', elev.maxFt], ['Min', elev.minFt]].map(([s, v]) => (
+                          <div key={s} style={{ display: 'flex', alignItems: 'baseline', gap: 4 }}>
+                            <span style={{ fontSize: 9, fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase', color: C.textMuted }}>{s}</span>
+                            <span style={{ fontFamily: mono, fontSize: 10, color: C.textSec }}>{v}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                    <div style={{ height: 120 }}>
+                      <ElevationChart
+                        elevFeet={elev.elevFeet}
+                        distanceLabels={elev.distanceLabels}
+                        onHoverIdx={handleElevHover}
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {/* Open In */}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8, paddingBottom: 'max(env(safe-area-inset-bottom), 16px)' }}>
+                  <SectionLabel>Open In</SectionLabel>
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    {['Google Maps', 'Apple Maps', 'Waze'].map(app => (
+                      <Button key={app} variant="outline" size="sm" style={{ flex: 1, fontSize: 11, minHeight: 44 }} disabled>{app}</Button>
+                    ))}
+                  </div>
+                </div>
+              </>
+            ) : (
+              /* Condensed alerts in peek / half state */
+              alerts.length > 0 && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  <SectionLabel>Route Alerts</SectionLabel>
+                  {alerts.map((alert, i) => (
+                    <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10, borderLeft: `2px solid ${mobileAlertBorder(alert)}`, paddingLeft: 10, minHeight: 36 }}>
+                      <span style={{ fontSize: 14 }}>{alert.emoji}</span>
+                      <div>
+                        <p style={{ fontSize: 11, fontWeight: 500, color: C.textPri }}>{alert.title}</p>
+                        {alert.meta && <p style={{ fontFamily: mono, fontSize: 9, color: C.textMuted }}>{alert.meta}</p>}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )
+            )}
+
+          </div>{/* end scrollable body */}
+        </div>{/* end bottom sheet */}
+
+        <Toast message={toast} onDismiss={() => setToast(null)} />
+      </div>
+    )
+  }
+
+  // ── Desktop render ─────────────────────────────────────────
   return (
     <div style={{ display: 'flex', height: '100vh', width: '100vw', overflow: 'hidden', background: C.pageBg }}>
 
@@ -708,6 +1197,27 @@ export default function App() {
               iconEl={<MapPin size={14} style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', color: C.accent, zIndex: 1 }} />}
             />
           </div>
+          {/* Swap button — sits in the gap between origin and dest */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: -4, marginBottom: -4 }}>
+            <div style={{ flex: 1, height: 1, background: C.borderPri }} />
+            <button
+              onClick={handleSwap}
+              title="Swap origin and destination"
+              style={{
+                width: 26, height: 26, borderRadius: '50%',
+                background: C.elevated, border: `1px solid ${C.borderSec}`,
+                color: C.textSec, cursor: 'pointer',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                flexShrink: 0, transition: 'color 0.15s, border-color 0.15s',
+              }}
+              onMouseEnter={e => { e.currentTarget.style.color = C.textPri; e.currentTarget.style.borderColor = C.accent }}
+              onMouseLeave={e => { e.currentTarget.style.color = C.textSec; e.currentTarget.style.borderColor = C.borderSec }}
+            >
+              <ArrowUpDown size={12} />
+            </button>
+            <div style={{ flex: 1, height: 1, background: C.borderPri }} />
+          </div>
+
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
             <SectionLabel>Destination</SectionLabel>
             <AutocompleteInput
