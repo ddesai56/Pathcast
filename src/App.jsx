@@ -894,7 +894,11 @@ export default function App() {
       <div style={{ position: 'relative', width: '100vw', height: '100dvh', overflow: 'hidden', background: C.pageBg }}>
 
         {/* ── Full-screen map ── */}
-        <div style={{ position: 'absolute', inset: 0 }}>
+        <div style={{
+          position: 'absolute', inset: 0,
+          filter: activeStyleId !== 'dark' ? 'brightness(0.68) saturate(0.88)' : 'none',
+          transition: 'filter 0.45s ease',
+        }}>
           <MapView onMapReady={handleMapReady} />
         </div>
 
@@ -1696,7 +1700,14 @@ export default function App() {
 
         {/* Map */}
         <div style={{ flex: 1, position: 'relative', background: C.pageBg }}>
-          <MapView onMapReady={handleMapReady} />
+          {/* Wrapper so the filter only touches the map canvas, not the overlays */}
+          <div style={{
+            position: 'absolute', inset: 0,
+            filter: activeStyleId !== 'dark' ? 'brightness(0.68) saturate(0.88)' : 'none',
+            transition: 'filter 0.45s ease',
+          }}>
+            <MapView onMapReady={handleMapReady} />
+          </div>
 
           {/* Style toggle — top-right of map */}
           <div style={{ position: 'absolute', top: 12, right: 12, zIndex: 10 }}>
