@@ -56,6 +56,42 @@ function getSnapPx(pos) {
   return Math.round(h * 0.9 - 120)  // peek
 }
 
+// ── Map style catalogue ───────────────────────────────────────
+const MAP_STYLES = [
+  { id: 'dark',      label: 'Dark',      url: 'mapbox://styles/mapbox/dark-v11' },
+  { id: 'streets',   label: 'Streets',   url: 'mapbox://styles/mapbox/streets-v12' },
+  { id: 'satellite', label: 'Satellite', url: 'mapbox://styles/mapbox/satellite-streets-v12' },
+  { id: 'outdoors',  label: 'Outdoors',  url: 'mapbox://styles/mapbox/outdoors-v12' },
+]
+
+// Re-add only the GeoJSON route sources/layers after a style change.
+// (DOM markers survive setStyle automatically.)
+function redrawRouteLines(map, routeData, activeIdx) {
+  const order = routeData.length === 2
+    ? (activeIdx === 0 ? [1, 0] : [0, 1])
+    : [0]
+  order.forEach(i => {
+    if (!routeData[i]) return
+    const isActive = i === activeIdx
+    map.addSource(`route-${i}`, {
+      type: 'geojson',
+      data: { type: 'Feature', properties: {}, geometry: routeData[i].geometry },
+    })
+    const paint = {
+      'line-color': isActive ? '#00d4aa' : '#555b6e',
+      'line-width': isActive ? 5 : 3,
+    }
+    if (!isActive) paint['line-dasharray'] = [2, 2]
+    map.addLayer({
+      id:     `route-layer-${i}`,
+      type:   'line',
+      source: `route-${i}`,
+      layout: { 'line-join': 'round', 'line-cap': 'round' },
+      paint,
+    })
+  })
+}
+
 const RISK_FACTORS = [
   { label: 'Precipitation', weight: 35 },
   { label: 'Elevation',     weight: 25 },
@@ -268,6 +304,50 @@ const Divider = () => (
   <div style={{ height: 1, background: C.borderPri, flexShrink: 0 }} />
 )
 
+// ── Map style toggle pill ──────────────────────────────────────
+function MapStyleToggle({ activeStyleId, onStyleChange, style: wrapStyle }) {
+  return (
+    <div style={{
+      display: 'flex',
+      background: 'rgba(13,15,20,0.82)',
+      backdropFilter: 'blur(10px)',
+      WebkitBackdropFilter: 'blur(10px)',
+      borderRadius: 8,
+      border: '1px solid rgba(255,255,255,0.1)',
+      boxShadow: '0 2px 14px rgba(0,0,0,0.5)',
+      overflow: 'hidden',
+      ...wrapStyle,
+    }}>
+      {MAP_STYLES.map((s, i) => {
+        const active = s.id === activeStyleId
+        return (
+          <button
+            key={s.id}
+            onClick={() => onStyleChange(s)}
+            style={{
+              background: active ? 'rgba(0,212,170,0.18)' : 'transparent',
+              color:      active ? '#00d4aa' : '#8b90a0',
+              border:     'none',
+              borderRight: i < MAP_STYLES.length - 1 ? '1px solid rgba(255,255,255,0.07)' : 'none',
+              padding: '5px 11px',
+              fontSize: 11,
+              fontFamily: "'DM Sans', sans-serif",
+              fontWeight: active ? 600 : 400,
+              cursor: 'pointer',
+              transition: 'background 0.15s, color 0.15s',
+              whiteSpace: 'nowrap',
+              minHeight: 30,
+              lineHeight: 1,
+            }}
+          >
+            {s.label}
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
 // ── Time label for timeline (e.g. "0 min", "45 min", "1h 30m") ──
 function formatTimeline(seconds) {
   if (seconds === 0) return '0 min'
@@ -426,6 +506,9 @@ export default function App() {
   const [allAlerts,         setAllAlerts]         = useState([])   // alerts[][routeIdx]
   const [conditionsLoading, setConditionsLoading] = useState(false)
   const [loadingPhase,      setLoadingPhase]      = useState(null) // 'weather'|'elevation'|null
+
+  // ── Map style ──
+  const [activeStyleId, setActiveStyleId] = useState('dark')
 
   // ── Mobile UI state ──
   const [isMobile,        setIsMobile]        = useState(() => window.innerWidth < 768)
@@ -775,6 +858,20 @@ export default function App() {
     setSheetPos(target)
   }
 
+  // ── Switch map style ──
+  // GeoJSON sources/layers are wiped on setStyle; DOM markers survive untouched.
+  function handleStyleChange(style) {
+    const map = mapRef.current
+    if (!map || style.id === activeStyleId) return
+    setActiveStyleId(style.id)
+    map.setStyle(style.url)
+    map.once('style.load', () => {
+      const rs = routesRef.current
+      const ai = activeRouteIdxRef.current
+      if (rs.length > 0) redrawRouteLines(map, rs, ai)
+    })
+  }
+
   const canSearch = !!(originCoords && destCoords)
 
   // Derive per-active-route values from the per-route arrays
@@ -799,6 +896,15 @@ export default function App() {
         {/* ── Full-screen map ── */}
         <div style={{ position: 'absolute', inset: 0 }}>
           <MapView onMapReady={handleMapReady} />
+        </div>
+
+        {/* Style toggle — top-right, clears the logo row of the top bar */}
+        <div style={{
+          position: 'absolute', zIndex: 120,
+          top: 'calc(env(safe-area-inset-top, 0px) + 54px)',
+          right: 10,
+        }}>
+          <MapStyleToggle activeStyleId={activeStyleId} onStyleChange={handleStyleChange} />
         </div>
 
         {/* ── Top search bar ── */}
@@ -1591,6 +1697,12 @@ export default function App() {
         {/* Map */}
         <div style={{ flex: 1, position: 'relative', background: C.pageBg }}>
           <MapView onMapReady={handleMapReady} />
+
+          {/* Style toggle — top-right of map */}
+          <div style={{ position: 'absolute', top: 12, right: 12, zIndex: 10 }}>
+            <MapStyleToggle activeStyleId={activeStyleId} onStyleChange={handleStyleChange} />
+          </div>
+
           {routes.length === 0 && !loading && (
             <div style={{
               position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column',
