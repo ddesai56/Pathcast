@@ -69,6 +69,17 @@ const MAP_STYLES = [
 // ── Re-add only the GeoJSON route sources/layers after a style change. ─
 // DOM markers survive setStyle automatically; only GL layers need re-adding.
 // Layer order: border → line (ensures coloured line sits on top)
+function routeBorderPaint(isActive) {
+  return isActive
+    ? { 'line-color': '#000000', 'line-width': 7,  'line-opacity': 0.38 }
+    : { 'line-color': '#ffffff', 'line-width': 7,  'line-opacity': 0.50 }
+}
+function routeLinePaint(isActive) {
+  return isActive
+    ? { 'line-color': '#00d4aa', 'line-width': 5,  'line-opacity': 1 }
+    : { 'line-color': '#9696aa', 'line-width': 4,  'line-opacity': 0.85, 'line-dasharray': [3, 2] }
+}
+
 function redrawRouteLines(map, routeData, activeIdx) {
   const order = routeData.length === 2
     ? (activeIdx === 0 ? [1, 0] : [0, 1])
@@ -80,22 +91,15 @@ function redrawRouteLines(map, routeData, activeIdx) {
       type: 'geojson',
       data: { type: 'Feature', properties: {}, geometry: routeData[i].geometry },
     })
-    // Border (wider, semi-transparent black outline so route pops on any basemap)
     map.addLayer({
       id: `route-border-${i}`, type: 'line', source: `route-${i}`,
       layout: { 'line-join': 'round', 'line-cap': 'round' },
-      paint: { 'line-color': '#000000', 'line-width': isActive ? 8 : 5, 'line-opacity': isActive ? 0.38 : 0.25 },
+      paint: routeBorderPaint(isActive),
     })
-    // Coloured line on top of border
-    const linePaint = {
-      'line-color': isActive ? '#00d4aa' : '#555b6e',
-      'line-width': isActive ? 5 : 3,
-    }
-    if (!isActive) linePaint['line-dasharray'] = [2, 2]
     map.addLayer({
       id: `route-layer-${i}`, type: 'line', source: `route-${i}`,
       layout: { 'line-join': 'round', 'line-cap': 'round' },
-      paint: linePaint,
+      paint: routeLinePaint(isActive),
     })
   })
 }
@@ -470,18 +474,12 @@ function drawRoutesOnMap(map, routeData, activeIdx, markers) {
     map.addLayer({
       id: `route-border-${i}`, type: 'line', source: `route-${i}`,
       layout: { 'line-join': 'round', 'line-cap': 'round' },
-      paint: { 'line-color': '#000000', 'line-width': isActive ? 8 : 5, 'line-opacity': isActive ? 0.38 : 0.25 },
+      paint: routeBorderPaint(isActive),
     })
-    // Coloured line on top
-    const paint = {
-      'line-color': isActive ? '#00d4aa' : '#555b6e',
-      'line-width': isActive ? 5 : 3,
-    }
-    if (!isActive) paint['line-dasharray'] = [2, 2]
     map.addLayer({
       id: `route-layer-${i}`, type: 'line', source: `route-${i}`,
       layout: { 'line-join': 'round', 'line-cap': 'round' },
-      paint,
+      paint: routeLinePaint(isActive),
     })
   })
 }
@@ -553,6 +551,8 @@ export default function App() {
   const originCoordsRef     = useRef(null)
   const destCoordsRef       = useRef(null)
   const activeRouteIdxRef   = useRef(0)
+  const routeListenersRef   = useRef([])   // {type,layerId,fn}[] — cleared before each re-attach
+  const routeHoverPopupRef  = useRef(null) // Mapbox Popup for alt-route hover tooltip
   // Bottom-sheet drag state (mobile)
   const sheetRef = useRef(null)
   const dragRef  = useRef({ dragging: false, startY: 0, startTranslate: 0, lastY: 0, lastTime: 0, velocity: 0 })
@@ -575,6 +575,84 @@ export default function App() {
       elevHoverMarkerRef.current.remove()
       elevHoverMarkerRef.current = null
     }
+  }
+
+  // ── Remove all route map event listeners + hover popup ──────
+  function clearRouteListeners() {
+    const map = mapRef.current
+    if (map) {
+      routeListenersRef.current.forEach(({ type, layerId, fn }) => map.off(type, layerId, fn))
+    }
+    routeListenersRef.current = []
+    routeHoverPopupRef.current?.remove()
+    routeHoverPopupRef.current = null
+  }
+
+  // ── Wire up click-to-select and hover effects on route layers ─
+  // Call after every drawRoutesOnMap / redrawRouteLines.
+  // Attaches events only to the border layers (9px wide = good click target).
+  function addRouteInteractivity(map, activeIdx, numRoutes) {
+    clearRouteListeners()
+    if (numRoutes < 2) return
+
+    const altIdx      = activeIdx === 0 ? 1 : 0
+    const altBorderId = `route-border-${altIdx}`
+    const altLineId   = `route-layer-${altIdx}`
+    const actBorderId = `route-border-${activeIdx}`
+    const routeLabel  = `Click to select Route ${altIdx === 0 ? 'A' : 'B'}`
+
+    const listeners = []
+    const addL = (type, layerId, fn) => {
+      map.on(type, layerId, fn)
+      listeners.push({ type, layerId, fn })
+    }
+
+    // Pointer cursor on active route border
+    addL('mouseenter', actBorderId, () => { map.getCanvas().style.cursor = 'pointer' })
+    addL('mouseleave', actBorderId, () => { map.getCanvas().style.cursor = '' })
+
+    // Hover: thicken alt line + show tooltip
+    const onAltEnter = (e) => {
+      map.setPaintProperty(altLineId, 'line-width', 5)
+      map.setPaintProperty(altLineId, 'line-opacity', 1)
+      map.getCanvas().style.cursor = 'pointer'
+      routeHoverPopupRef.current?.remove()
+      routeHoverPopupRef.current = new mapboxgl.Popup({
+        closeButton: false, closeOnClick: false,
+        anchor: 'bottom', offset: [0, -10],
+        className: 'route-hover-popup', focusAfterOpen: false,
+      })
+        .setLngLat(e.lngLat)
+        .setHTML(
+          `<div style="background:#13161e;color:#f0f2f7;font-size:11px;` +
+          `font-family:'DM Sans',sans-serif;padding:4px 8px;border-radius:6px;` +
+          `border:1px solid rgba(255,255,255,0.12);white-space:nowrap;pointer-events:none">` +
+          `${routeLabel}</div>`
+        )
+        .addTo(map)
+    }
+    const onAltMove  = (e) => { routeHoverPopupRef.current?.setLngLat(e.lngLat) }
+    const onAltLeave = () => {
+      map.setPaintProperty(altLineId, 'line-width', 4)
+      map.setPaintProperty(altLineId, 'line-opacity', 0.85)
+      routeHoverPopupRef.current?.remove()
+      routeHoverPopupRef.current = null
+      map.getCanvas().style.cursor = ''
+    }
+    // Click: select the alternate route
+    const onAltClick = () => {
+      routeHoverPopupRef.current?.remove()
+      routeHoverPopupRef.current = null
+      map.getCanvas().style.cursor = ''
+      handleRouteSelect(altIdx)
+    }
+
+    addL('mouseenter', altBorderId, onAltEnter)
+    addL('mousemove',  altBorderId, onAltMove)
+    addL('mouseleave', altBorderId, onAltLeave)
+    addL('click',      altBorderId, onAltClick)
+
+    routeListenersRef.current = listeners
   }
 
   // ── Load conditions for ALL routes simultaneously ────────────
@@ -667,6 +745,7 @@ export default function App() {
     setAllAlerts([])
     allConditionsRef.current = []
     routesRef.current = []
+    clearRouteListeners()
     clearWeatherMarkers()
     clearElevHoverMarker()
 
@@ -691,6 +770,7 @@ export default function App() {
       const map = mapRef.current
       if (map) {
         drawRoutesOnMap(map, fetched, 0, markersRef.current)
+        addRouteInteractivity(map, 0, fetched.length)
         const mA = new mapboxgl.Marker({ element: createRouteMarkerEl('A') }).setLngLat(org).addTo(map)
         const mB = new mapboxgl.Marker({ element: createRouteMarkerEl('B') }).setLngLat(dst).addTo(map)
         markersRef.current.push(mA, mB)
@@ -708,10 +788,12 @@ export default function App() {
   }
 
   // ── Switch active route ──
+  // Uses activeRouteIdxRef (not activeRouteIdx state) for the guard so this
+  // function is safe to call from Mapbox event handlers (stale closure safe).
   function handleRouteSelect(idx) {
     const map       = mapRef.current
     const allRoutes = routesRef.current
-    if (!map || idx >= allRoutes.length || idx === activeRouteIdx) return
+    if (!map || idx >= allRoutes.length || idx === activeRouteIdxRef.current) return
 
     setActiveRouteIdx(idx)
     activeRouteIdxRef.current = idx
@@ -724,6 +806,9 @@ export default function App() {
       const mB = new mapboxgl.Marker({ element: createRouteMarkerEl('B') }).setLngLat(dst).addTo(map)
       markersRef.current.push(mA, mB)
     }
+
+    // Re-wire route interactivity for the new active/alt configuration
+    addRouteInteractivity(map, idx, allRoutes.length)
 
     // Swap weather markers to those already fetched for this route — no re-fetch
     clearWeatherMarkers()
@@ -906,7 +991,10 @@ export default function App() {
       settled = true
       const rs = routesRef.current
       const ai = activeRouteIdxRef.current
-      if (rs.length > 0) redrawRouteLines(map, rs, ai)
+      if (rs.length > 0) {
+        redrawRouteLines(map, rs, ai)
+        addRouteInteractivity(map, ai, rs.length)
+      }
     }
 
     // Primary path: styledata fires repeatedly; wait until style is truly ready

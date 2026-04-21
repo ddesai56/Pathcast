@@ -82,6 +82,21 @@ body {
   z-index: 200;
 }
 
+/* Route hover tooltip — transparent wrapper, styled inner div */
+.route-hover-popup .mapboxgl-popup-content {
+  background: transparent;
+  padding: 0;
+  box-shadow: none;
+  border-radius: 0;
+}
+.route-hover-popup .mapboxgl-popup-tip {
+  display: none;
+}
+.route-hover-popup.mapboxgl-popup {
+  z-index: 180;
+  pointer-events: none;
+}
+
 /* Mobile: push Mapbox controls clear of the bottom-sheet peek and top bar */
 @media (max-width: 768px) {
   /* Zoom buttons — sit above the 120px peek */
