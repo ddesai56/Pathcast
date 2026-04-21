@@ -57,15 +57,18 @@ function getSnapPx(pos) {
 }
 
 // ── Map style catalogue ───────────────────────────────────────
+// dark:true → teal inactive tint (Dark / Satellite group)
+// Order: Dark · Satellite · divider · Streets · Outdoors
 const MAP_STYLES = [
-  { id: 'dark',      label: 'Dark',      url: 'mapbox://styles/mapbox/dark-v11' },
-  { id: 'streets',   label: 'Streets',   url: 'mapbox://styles/mapbox/streets-v12' },
-  { id: 'satellite', label: 'Satellite', url: 'mapbox://styles/mapbox/satellite-streets-v12' },
-  { id: 'outdoors',  label: 'Outdoors',  url: 'mapbox://styles/mapbox/outdoors-v12' },
+  { id: 'dark',      label: 'Dark',      url: 'mapbox://styles/mapbox/dark-v11',              dark: true  },
+  { id: 'satellite', label: 'Satellite', url: 'mapbox://styles/mapbox/satellite-streets-v12', dark: true  },
+  { id: 'streets',   label: 'Streets',   url: 'mapbox://styles/mapbox/streets-v12',           dark: false },
+  { id: 'outdoors',  label: 'Outdoors',  url: 'mapbox://styles/mapbox/outdoors-v12',          dark: false },
 ]
 
-// Re-add only the GeoJSON route sources/layers after a style change.
-// (DOM markers survive setStyle automatically.)
+// ── Re-add only the GeoJSON route sources/layers after a style change. ─
+// DOM markers survive setStyle automatically; only GL layers need re-adding.
+// Layer order: border → line (ensures coloured line sits on top)
 function redrawRouteLines(map, routeData, activeIdx) {
   const order = routeData.length === 2
     ? (activeIdx === 0 ? [1, 0] : [0, 1])
@@ -77,17 +80,22 @@ function redrawRouteLines(map, routeData, activeIdx) {
       type: 'geojson',
       data: { type: 'Feature', properties: {}, geometry: routeData[i].geometry },
     })
-    const paint = {
+    // Border (wider, semi-transparent black outline so route pops on any basemap)
+    map.addLayer({
+      id: `route-border-${i}`, type: 'line', source: `route-${i}`,
+      layout: { 'line-join': 'round', 'line-cap': 'round' },
+      paint: { 'line-color': '#000000', 'line-width': isActive ? 8 : 5, 'line-opacity': isActive ? 0.38 : 0.25 },
+    })
+    // Coloured line on top of border
+    const linePaint = {
       'line-color': isActive ? '#00d4aa' : '#555b6e',
       'line-width': isActive ? 5 : 3,
     }
-    if (!isActive) paint['line-dasharray'] = [2, 2]
+    if (!isActive) linePaint['line-dasharray'] = [2, 2]
     map.addLayer({
-      id:     `route-layer-${i}`,
-      type:   'line',
-      source: `route-${i}`,
+      id: `route-layer-${i}`, type: 'line', source: `route-${i}`,
       layout: { 'line-join': 'round', 'line-cap': 'round' },
-      paint,
+      paint: linePaint,
     })
   })
 }
@@ -304,44 +312,57 @@ const Divider = () => (
   <div style={{ height: 1, background: C.borderPri, flexShrink: 0 }} />
 )
 
-// ── Map style toggle pill ──────────────────────────────────────
+// ── Map style toggle — frosted dark pill ───────────────────────
+// Dark · Satellite | Streets · Outdoors
+// A thin divider separates the two groups visually.
 function MapStyleToggle({ activeStyleId, onStyleChange, style: wrapStyle }) {
   return (
     <div style={{
-      display: 'flex',
-      background: 'rgba(13,15,20,0.82)',
-      backdropFilter: 'blur(10px)',
-      WebkitBackdropFilter: 'blur(10px)',
-      borderRadius: 8,
-      border: '1px solid rgba(255,255,255,0.1)',
-      boxShadow: '0 2px 14px rgba(0,0,0,0.5)',
-      overflow: 'hidden',
+      display: 'flex', alignItems: 'center', gap: 2,
+      background: 'rgba(13,15,20,0.85)',
+      backdropFilter: 'blur(8px)',
+      WebkitBackdropFilter: 'blur(8px)',
+      borderRadius: 10,
+      padding: 4,
+      boxShadow: '0 2px 12px rgba(0,0,0,0.5)',
       ...wrapStyle,
     }}>
       {MAP_STYLES.map((s, i) => {
         const active = s.id === activeStyleId
+        // Divider between Satellite (index 1) and Streets (index 2)
+        const showDivider = i === 2
         return (
-          <button
-            key={s.id}
-            onClick={() => onStyleChange(s)}
-            style={{
-              background: active ? 'rgba(0,212,170,0.18)' : 'transparent',
-              color:      active ? '#00d4aa' : '#8b90a0',
-              border:     'none',
-              borderRight: i < MAP_STYLES.length - 1 ? '1px solid rgba(255,255,255,0.07)' : 'none',
-              padding: '5px 11px',
-              fontSize: 11,
-              fontFamily: "'DM Sans', sans-serif",
-              fontWeight: active ? 600 : 400,
-              cursor: 'pointer',
-              transition: 'background 0.15s, color 0.15s',
-              whiteSpace: 'nowrap',
-              minHeight: 30,
-              lineHeight: 1,
-            }}
-          >
-            {s.label}
-          </button>
+          <>
+            {showDivider && (
+              <div key="divider" style={{
+                width: 1, height: 16, flexShrink: 0,
+                background: 'rgba(255,255,255,0.15)',
+                margin: '0 2px',
+              }} />
+            )}
+            <button
+              key={s.id}
+              onClick={() => onStyleChange(s)}
+              style={{
+                background:  active ? '#00d4aa'                         : 'transparent',
+                color:       active ? '#000'
+                           : s.dark ? 'rgba(0,212,170,0.7)'
+                           :          'rgba(255,255,255,0.5)',
+                border: 'none',
+                borderRadius: 7,
+                padding: '5px 10px',
+                fontSize: 12,
+                fontFamily: "'DM Sans', sans-serif",
+                fontWeight: active ? 600 : 400,
+                cursor: 'pointer',
+                transition: 'background 0.15s ease, color 0.15s ease',
+                whiteSpace: 'nowrap',
+                lineHeight: 1,
+              }}
+            >
+              {s.label}
+            </button>
+          </>
         )
       })}
     </div>
@@ -429,9 +450,11 @@ function weatherPopupHtml(pt) {
 function drawRoutesOnMap(map, routeData, activeIdx, markers) {
   markers.forEach(m => m.remove())
   markers.length = 0
+  // Remove line → border → source in that order (layers must go before their source)
   for (let i = 0; i < 2; i++) {
-    if (map.getLayer(`route-layer-${i}`)) map.removeLayer(`route-layer-${i}`)
-    if (map.getSource(`route-${i}`))      map.removeSource(`route-${i}`)
+    if (map.getLayer(`route-layer-${i}`))  map.removeLayer(`route-layer-${i}`)
+    if (map.getLayer(`route-border-${i}`)) map.removeLayer(`route-border-${i}`)
+    if (map.getSource(`route-${i}`))       map.removeSource(`route-${i}`)
   }
   const order = routeData.length === 2
     ? (activeIdx === 0 ? [1, 0] : [0, 1])
@@ -443,15 +466,20 @@ function drawRoutesOnMap(map, routeData, activeIdx, markers) {
       type: 'geojson',
       data: { type: 'Feature', properties: {}, geometry: routeData[i].geometry },
     })
+    // Border layer first (sits below the coloured line)
+    map.addLayer({
+      id: `route-border-${i}`, type: 'line', source: `route-${i}`,
+      layout: { 'line-join': 'round', 'line-cap': 'round' },
+      paint: { 'line-color': '#000000', 'line-width': isActive ? 8 : 5, 'line-opacity': isActive ? 0.38 : 0.25 },
+    })
+    // Coloured line on top
     const paint = {
       'line-color': isActive ? '#00d4aa' : '#555b6e',
       'line-width': isActive ? 5 : 3,
     }
     if (!isActive) paint['line-dasharray'] = [2, 2]
     map.addLayer({
-      id: `route-layer-${i}`,
-      type: 'line',
-      source: `route-${i}`,
+      id: `route-layer-${i}`, type: 'line', source: `route-${i}`,
       layout: { 'line-join': 'round', 'line-cap': 'round' },
       paint,
     })
@@ -859,17 +887,41 @@ export default function App() {
   }
 
   // ── Switch map style ──
-  // GeoJSON sources/layers are wiped on setStyle; DOM markers survive untouched.
+  // Active button highlight updates immediately via setActiveStyleId.
+  // Route lines are re-added once the style is fully loaded via styledata.
+  // A 3-second safety timeout ensures routes always come back even if
+  // styledata fires before isStyleLoaded() is true.
   function handleStyleChange(style) {
     const map = mapRef.current
     if (!map || style.id === activeStyleId) return
+
+    // Immediately reflect the new selection in the button group
     setActiveStyleId(style.id)
     map.setStyle(style.url)
-    map.once('style.load', () => {
+
+    // settled flag prevents double-redraw if both styledata + timeout fire
+    let settled = false
+    const redraw = () => {
+      if (settled) return
+      settled = true
       const rs = routesRef.current
       const ai = activeRouteIdxRef.current
       if (rs.length > 0) redrawRouteLines(map, rs, ai)
-    })
+    }
+
+    // Primary path: styledata fires repeatedly; wait until style is truly ready
+    const onStyleData = () => {
+      if (!map.isStyleLoaded()) return
+      map.off('styledata', onStyleData)
+      redraw()
+    }
+    map.on('styledata', onStyleData)
+
+    // Safety net: force-redraw after 3 s so routes are never permanently lost
+    setTimeout(() => {
+      map.off('styledata', onStyleData)
+      redraw()
+    }, 3000)
   }
 
   const canSearch = !!(originCoords && destCoords)
@@ -894,11 +946,7 @@ export default function App() {
       <div style={{ position: 'relative', width: '100vw', height: '100dvh', overflow: 'hidden', background: C.pageBg }}>
 
         {/* ── Full-screen map ── */}
-        <div style={{
-          position: 'absolute', inset: 0,
-          filter: activeStyleId !== 'dark' ? 'brightness(0.68) saturate(0.88)' : 'none',
-          transition: 'filter 0.45s ease',
-        }}>
+        <div style={{ position: 'absolute', inset: 0 }}>
           <MapView onMapReady={handleMapReady} />
         </div>
 
@@ -1700,14 +1748,7 @@ export default function App() {
 
         {/* Map */}
         <div style={{ flex: 1, position: 'relative', background: C.pageBg }}>
-          {/* Wrapper so the filter only touches the map canvas, not the overlays */}
-          <div style={{
-            position: 'absolute', inset: 0,
-            filter: activeStyleId !== 'dark' ? 'brightness(0.68) saturate(0.88)' : 'none',
-            transition: 'filter 0.45s ease',
-          }}>
-            <MapView onMapReady={handleMapReady} />
-          </div>
+          <MapView onMapReady={handleMapReady} />
 
           {/* Style toggle — top-right of map */}
           <div style={{ position: 'absolute', top: 12, right: 12, zIndex: 10 }}>
