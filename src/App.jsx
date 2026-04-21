@@ -306,6 +306,56 @@ function getRiskExplanation(scores) {
   }[top[0]] ?? 'Conditions look good. Standard safe driving applies.'
 }
 
+// ── Navigation handoff — open route in external app ──────────
+// Mapbox stores coords as [lng, lat]; mapping apps expect lat, lng.
+
+function openGoogleMaps(originCoords, destCoords) {
+  const [oLng, oLat] = originCoords
+  const [dLng, dLat] = destCoords
+  window.open(
+    `https://www.google.com/maps/dir/?api=1` +
+    `&origin=${oLat},${oLng}&destination=${dLat},${dLng}&travelmode=driving`,
+    '_blank'
+  )
+}
+
+function openAppleMaps(originCoords, destCoords) {
+  const [oLng, oLat] = originCoords
+  const [dLng, dLat] = destCoords
+  const isMobile = /iPad|iPhone|iPod/.test(navigator.userAgent)
+  const url = isMobile
+    ? `maps://?saddr=${oLat},${oLng}&daddr=${dLat},${dLng}&dirflg=d`
+    : `https://maps.apple.com/?saddr=${oLat},${oLng}&daddr=${dLat},${dLng}&dirflg=d`
+  window.open(url, '_blank')
+}
+
+function openWaze(originCoords, destCoords) {
+  const [oLng, oLat] = originCoords
+  const [dLng, dLat] = destCoords
+  const isMobile = /iPad|iPhone|iPod|Android/.test(navigator.userAgent)
+  if (isMobile) {
+    window.open(
+      `waze://?ll=${dLat},${dLng}&navigate=yes&from=${oLat},${oLng}`,
+      '_blank'
+    )
+    // Fallback to Waze web if the app isn't installed
+    setTimeout(() => {
+      window.location.href = `https://waze.com/ul?ll=${dLat},${dLng}&navigate=yes`
+    }, 1500)
+  } else {
+    window.open(
+      `https://www.waze.com/ul?ll=${dLat},${dLng}&navigate=yes&from=${oLat},${oLng}`,
+      '_blank'
+    )
+  }
+}
+
+const NAV_APPS = [
+  { id: 'google', label: 'Google Maps', labelColor: '#4285F4', tooltip: 'Opens in Google Maps', handler: openGoogleMaps },
+  { id: 'apple',  label: 'Apple Maps',  labelColor: '#f0f2f7', tooltip: 'Opens in Apple Maps',  handler: openAppleMaps  },
+  { id: 'waze',   label: 'Waze',        labelColor: '#33CCFF', tooltip: 'Opens in Waze',        handler: openWaze       },
+]
+
 // ── Shared UI primitives ──────────────────────────────────────
 const SectionLabel = ({ children }) => (
   <p style={{ fontSize: 10, fontWeight: 600, letterSpacing: '0.1em', textTransform: 'uppercase', color: C.textMuted }}>
@@ -370,6 +420,36 @@ function MapStyleToggle({ activeStyleId, onStyleChange, style: wrapStyle }) {
         )
       })}
     </div>
+  )
+}
+
+// ── Navigation handoff button ─────────────────────────────────
+// Dark card: single centered brand-colored label.
+function NavBtn({ label, labelColor, tooltip, disabled, onClick }) {
+  const [hovered, setHovered] = useState(false)
+  return (
+    <button
+      title={tooltip}
+      onClick={disabled ? undefined : onClick}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        background: hovered && !disabled ? C.elevated : C.cardBg,
+        border: `1px solid ${C.borderSec}`,
+        borderRadius: 8,
+        padding: '10px 8px',
+        cursor: disabled ? 'not-allowed' : 'pointer',
+        opacity: disabled ? 0.4 : 1,
+        transition: 'background 0.15s ease, opacity 0.2s ease',
+      }}
+    >
+      <span style={{
+        fontSize: 13, fontWeight: 500, lineHeight: 1,
+        color: disabled ? C.textMuted : labelColor,
+        fontFamily: "'DM Sans', sans-serif",
+      }}>{label}</span>
+    </button>
   )
 }
 
@@ -1375,11 +1455,21 @@ export default function App() {
                 {/* Open In */}
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 8, paddingBottom: 'max(env(safe-area-inset-bottom), 16px)' }}>
                   <SectionLabel>Open In</SectionLabel>
-                  <div style={{ display: 'flex', gap: 8 }}>
-                    {['Google Maps', 'Apple Maps', 'Waze'].map(app => (
-                      <Button key={app} variant="outline" size="sm" style={{ flex: 1, fontSize: 11, minHeight: 44 }} disabled>{app}</Button>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 }}>
+                    {NAV_APPS.map(app => (
+                      <NavBtn
+                        key={app.id}
+                        label={app.label}
+                        labelColor={app.labelColor}
+                        tooltip={originCoords && destCoords ? app.tooltip : 'Search a route first'}
+                        disabled={!originCoords || !destCoords}
+                        onClick={() => app.handler(originCoords, destCoords)}
+                      />
                     ))}
                   </div>
+                  <p style={{ fontSize: 11, color: C.textMuted, textAlign: 'center', marginTop: 8 }}>
+                    Navigation opens with your start &amp; end points. Route may vary from Pathcast&apos;s recommendation.
+                  </p>
                 </div>
               </>
             ) : (
@@ -1820,13 +1910,21 @@ export default function App() {
         {/* ── Navigation Handoff ── */}
         <section style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 8, flexShrink: 0 }}>
           <SectionLabel>Open In</SectionLabel>
-          <div style={{ display: 'flex', gap: 8 }}>
-            {['Google Maps', 'Apple Maps', 'Waze'].map((app) => (
-              <Button key={app} variant="outline" size="sm" style={{ flex: 1, fontSize: 12 }} disabled>
-                {app}
-              </Button>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 }}>
+            {NAV_APPS.map(app => (
+              <NavBtn
+                key={app.id}
+                label={app.label}
+                labelColor={app.labelColor}
+                tooltip={originCoords && destCoords ? app.tooltip : 'Search a route first'}
+                disabled={!originCoords || !destCoords}
+                onClick={() => app.handler(originCoords, destCoords)}
+              />
             ))}
           </div>
+          <p style={{ fontSize: 11, color: C.textMuted, textAlign: 'center', marginTop: 8 }}>
+            Navigation opens with your start &amp; end points. Route may vary from Pathcast&apos;s recommendation.
+          </p>
         </section>
 
       </aside>
