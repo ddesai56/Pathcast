@@ -46,18 +46,36 @@ const crosshairPlugin = {
 // ── Component ─────────────────────────────────────────────────
 export default function ElevationChart({ elevFeet, distanceLabels, onHoverIdx }) {
   const chartRef   = useRef(null)
-  // Keep callback in a ref so options memo never needs to list it as dep
   const hoverCbRef = useRef(onHoverIdx)
   useEffect(() => { hoverCbRef.current = onHoverIdx }, [onHoverIdx])
 
-  // Remove hover marker when mouse leaves the canvas
+  // Attach mouse events directly on the canvas DOM node.
+  // Production builds (Vite/minified) can lose synthetic React event coverage
+  // on canvas elements; native addEventListener is always reliable.
   useEffect(() => {
-    const canvas = chartRef.current?.canvas
+    const chart  = chartRef.current
+    const canvas = chart?.canvas
     if (!canvas) return
-    const onLeave = () => hoverCbRef.current?.(null)
-    canvas.addEventListener('mouseleave', onLeave)
-    return () => canvas.removeEventListener('mouseleave', onLeave)
-  }, [])  // runs once after mount
+
+    // crosshair cursor so the chart looks interactive without a click
+    canvas.style.cursor = 'crosshair'
+
+    const handleMouseMove = (e) => {
+      // Delegate into Chart.js event handling so tooltip + onHover still fire
+      chart.canvas.dispatchEvent(new MouseEvent('mousemove', e))
+    }
+
+    const handleMouseLeave = () => {
+      hoverCbRef.current?.(null)
+    }
+
+    canvas.addEventListener('mousemove',  handleMouseMove)
+    canvas.addEventListener('mouseleave', handleMouseLeave)
+    return () => {
+      canvas.removeEventListener('mousemove',  handleMouseMove)
+      canvas.removeEventListener('mouseleave', handleMouseLeave)
+    }
+  }, []) // runs once after mount; hoverCbRef is stable
 
   const data = useMemo(() => ({
     labels: distanceLabels,
@@ -132,7 +150,20 @@ export default function ElevationChart({ elevFeet, distanceLabels, onHoverIdx })
   }), [distanceLabels])
 
   return (
-    <div style={{ width: '100%', height: '100%' }}>
+    // tabIndex + onMouseEnter focus: ensures the container receives pointer
+    // events immediately on hover in production without requiring a click first.
+    // position:relative + pointer-events:all override any inherited none from
+    // parent elements (the elevation panel dims with opacity during loading).
+    <div
+      tabIndex={0}
+      onMouseEnter={(e) => e.currentTarget.focus()}
+      style={{
+        width: '100%', height: '100%',
+        position: 'relative',
+        pointerEvents: 'all',
+        outline: 'none',
+      }}
+    >
       <Line
         ref={chartRef}
         data={data}
