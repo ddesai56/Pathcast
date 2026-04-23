@@ -157,35 +157,58 @@ pathcast/
 ## Core Features — Current State
 
 ### ✅ Complete and working
-- **Route input with autocomplete** — Mapbox Geocoding API, debounced 300ms, US + Canada
-- **Real routing** — Mapbox Directions API, up to 2 alternate routes with GeoJSON geometry
-- **Route comparison** — Route A vs Route B cards with risk scores, duration, distance, trade-off text
-- **Risk score engine** — 0–100 score with 5 weighted factors (see algorithm section below)
-- **Risk score breakdown** — Factor bars colored individually by their own score
-- **Route alerts** — Smart alerts generated from weather data (rain, wind, freeze, visibility, all-clear)
-- **Weather timeline** — Weather fetched every 45 minutes of travel time at forecasted arrival time
-- **Weather markers on map** — Emoji pills on map at each 45-min waypoint (capped at 8 markers)
-- **Elevation profile** — Chart.js line chart with gain/max/min stats, 80 sampled points
-- **Elevation ↔ map sync** — Hovering elevation chart shows amber pulsing marker on map
-- **Navigate handoff** — "Open in" buttons for Google Maps, Apple Maps, Waze
-- **Unit toggle** — mi/ft ↔ km/m throughout the app
-- **Departure time picker** — Changes weather fetching to use forecasted arrival time per waypoint
-- **Map style switcher** — Streets, Satellite, Outdoors
-- **Mobile layout** — Bottom sheet pattern, map-first, swipe up for details (partially complete, being refined)
-- **Deployment** — Live at pathcast.vercel.app, auto-deploys from GitHub main branch
+
+#### Map
+- **Mapbox GL JS map** — full-screen interactive base, dark style default
+- **4 map styles** — Dark, Satellite, Streets, Outdoors via frosted pill toggle; Dark and Satellite grouped as recommended
+- **Route lines** — active route: teal solid line with black border; alternate route: gray dashed with white border for contrast on all map styles
+- **Route endpoint markers** — teal circular DOM markers labeled A and B
+- **Route interactivity** — hover over alternate route thickens it and shows tooltip; clicking switches active route
+- **Weather waypoint markers** — up to 8 emoji pill markers along active route; hover shows popup with temp, wind, precip
+- **Elevation hover marker** — amber pulsing dot tracks cursor on elevation chart onto map in real time
+- **Map style persistence** — all route lines and markers redrawn after style switch via styledata event with 3-second safety timeout
+
+#### Route Planning
+- **Autocomplete inputs** — Mapbox Geocoding API, debounced, keyboard navigable
+- **Swap button** — swaps origin and destination text and coordinates
+- **Find Route** — Mapbox Directions API, up to 2 alternate routes fetched simultaneously
+- **Departure time toggle** — Leave now vs scheduled departure; weather offset by actual arrival time per waypoint
+- **Loading states** — button pulses during fetch with phase labels
+
+#### Conditions & Analysis
+- **Route comparison cards** — duration, distance, risk score; active card has teal left border; Best badge; trade-off insight pill
+- **Risk score** — 0–100 in DM Mono, color-coded, label, progress bar, plain English explanation, 5-factor breakdown bars
+- **Route alerts** — rain, wind, freezing, visibility alerts with city name via reverse geocoding; all-clear card when no hazards
+- **Weather timeline** — vertical timeline, one card per 45-min interval, calculated from departure time, Arrived row at bottom
+- **Elevation profile** — Chart.js line chart, gradient fill, hover crosshair, pulsing amber map dot, Gain/Max/Min stats
+
+#### Navigation Handoff
+- **Google Maps, Apple Maps, Waze buttons** — deep links with origin/destination; mobile uses native URI schemes with web fallback
+- **Disabled state** until route is searched
+- **Disclaimer** explaining route may vary
+
+#### Mobile Layout
+- **Responsive at 768px** — full-screen map + bottom sheet
+- **3 snap positions** — peek (120px), half (50%), full (90%)
+- **Drag-to-snap** — touch and mouse with momentum detection
+- **Collapsible top bar** — hides inputs to maximize map space
+
+#### Visual Design
+- **Section titles** — 12px uppercase with 3px teal left accent bar
+- **Sidebar hierarchy** — clear contrast between section titles, card content, and secondary labels
+- **Dark theme** — #0d0f14 background, #13161e sidebar, #1a1e28 cards, #00d4aa accent
 
 ### 🚧 In progress
-- **Mobile layout refinement** — Bottom sheet UX, input sizing, elevation on mobile
+- **Mobile layout refinement** — being handled in dedicated mobile chat
+- **Risk score algorithm** — being refined in dedicated algorithm chat
 
 ### 📋 Planned (not yet built)
-- **Swap button** — Toggle start/end points
-- **Departure time optimizer** — "Suggest best departure time" to minimize risk
-- **Color-coded route line** — Green/amber/red segments on map based on risk
-- **Mobile elevation** — Better elevation experience on small screens
-- **User accounts** — Save routes, history (requires Supabase backend)
+- **Departure time optimizer** — suggest best departure window to minimize risk score
+- **Color-coded route line** — green/amber/red segments on map based on risk per segment
+- **User accounts** — save routes, history (requires Supabase backend)
 - **Freemium paywall** — Pro features gated behind subscription
-- **SEO / landing page** — Route-specific pages for organic traffic
-- **iOS app** — Native SwiftUI app (future, requires iOS developer)
+- **SEO / landing page** — route-specific pages for organic traffic
+- **iOS app** — native SwiftUI app (future, requires iOS developer)
 
 ---
 
@@ -315,10 +338,10 @@ This project uses multiple Claude chats, each focused on a specific area:
 
 ## Known Issues / Bugs
 
-1. **Weather fetch errors** — Intermittent failures on Open-Meteo calls for some coordinates. Needs retry logic and better error handling.
-2. **Mobile bottom sheet** — Hard to collapse once fully expanded. Input fields slightly narrower than viewport.
-3. **Elevation on mobile** — Chart is hard to interact with on small screens. Needs redesign.
-4. **Route B score** — Fixed (both routes now pre-fetch weather + elevation in parallel).
+1. **Weather fetch errors** — Intermittent, could not be consistently reproduced. Monitor in production.
+2. **Mobile bottom sheet** — Hard to collapse once fully expanded. Being addressed in mobile chat.
+3. **Elevation chart on Safari** — Requires a click before hover events fire on the canvas. Chrome works correctly. Fix in progress.
+4. **Elevation on mobile** — Chart interaction is limited on small screens. Being addressed in mobile chat.
 
 ---
 
