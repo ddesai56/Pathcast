@@ -358,12 +358,15 @@ const NAV_APPS = [
 
 // ── Shared UI primitives ──────────────────────────────────────
 const SectionLabel = ({ children }) => (
-  <p style={{ fontSize: 10, fontWeight: 600, letterSpacing: '0.1em', textTransform: 'uppercase', color: C.textMuted }}>
-    {children}
-  </p>
+  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+    <div style={{ width: 3, height: 14, background: C.accent, borderRadius: 1, flexShrink: 0 }} />
+    <p style={{ fontSize: 12, fontWeight: 600, letterSpacing: '0.1em', textTransform: 'uppercase', color: C.textPri }}>
+      {children}
+    </p>
+  </div>
 )
 const Divider = () => (
-  <div style={{ height: 1, background: C.borderPri, flexShrink: 0 }} />
+  <div style={{ height: 1, background: 'rgba(255,255,255,0.1)', flexShrink: 0 }} />
 )
 
 // ── Map style toggle — frosted dark pill ───────────────────────
@@ -1506,7 +1509,7 @@ export default function App() {
       <aside
         className="sidebar-scroll"
         style={{
-          width: 380, flexShrink: 0, display: 'flex', flexDirection: 'column',
+          width: 390, flexShrink: 0, display: 'flex', flexDirection: 'column',
           overflowY: 'auto', background: C.sidebarBg,
           borderRight: `1px solid ${C.borderPri}`,
         }}
@@ -1521,7 +1524,7 @@ export default function App() {
         </header>
 
         {/* ── Route Inputs ── */}
-        <section style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 12, flexShrink: 0 }}>
+        <section style={{ padding: '20px 16px 16px', display: 'flex', flexDirection: 'column', gap: 12, flexShrink: 0 }}>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
             <SectionLabel>Start</SectionLabel>
             <AutocompleteInput
@@ -1578,7 +1581,7 @@ export default function App() {
         <Divider />
 
         {/* ── Departure Time ── */}
-        <section style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 10, flexShrink: 0 }}>
+        <section style={{ padding: '20px 16px 16px', display: 'flex', flexDirection: 'column', gap: 10, flexShrink: 0 }}>
           <SectionLabel>Departure Time</SectionLabel>
 
           {/* Toggle row */}
@@ -1652,7 +1655,7 @@ export default function App() {
           }
 
           return (
-            <section style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 8, flexShrink: 0 }}>
+            <section style={{ padding: '20px 16px 16px', display: 'flex', flexDirection: 'column', gap: 8, flexShrink: 0 }}>
               <SectionLabel>Route Comparison</SectionLabel>
               {[0, 1].map(i => {
                 if (routes.length > 0 && i >= routes.length) return null
@@ -1666,42 +1669,46 @@ export default function App() {
                     key={i}
                     onClick={() => handleRouteSelect(i)}
                     style={{
-                      background: C.cardBg, borderRadius: 12, padding: '10px 12px',
-                      border: `1px solid ${C.borderPri}`,
-                      boxShadow: isActive && routes.length > 0 ? `inset 3px 0 0 ${C.accent}` : 'none',
+                      background: isActive && routes.length > 0 ? '#1e2433' : C.cardBg,
+                      borderRadius: 12, padding: '14px',
+                      border: '1px solid transparent',
+                      borderLeft: isActive && routes.length > 0 ? `3px solid ${C.accent}` : '3px solid transparent',
                       cursor: routes.length > 0 ? 'pointer' : 'default',
                       opacity: routes.length === 0 ? 0.5 : 1,
-                      transition: 'box-shadow 0.15s',
+                      transition: 'background 0.15s, border-color 0.15s',
                     }}
                   >
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-                        <span style={{ fontSize: 13, fontWeight: 500, color: C.textPri }}>
+                        <span style={{ fontSize: 15, fontWeight: 600, color: C.textPri }}>
                           {i === 0 ? 'Route A' : 'Route B'}
                         </span>
                         {isBest && (
-                          <span style={{ fontSize: 10, color: C.accent, background: 'rgba(0,212,170,0.15)', borderRadius: 99, padding: '2px 8px', fontWeight: 500 }}>
+                          <span style={{ fontSize: 11, color: C.accent, background: 'rgba(0,212,170,0.15)', borderRadius: 99, padding: '3px 10px', fontWeight: 500 }}>
                             Best
                           </span>
                         )}
                       </div>
-                      <span style={{ fontFamily: mono, fontSize: 14, fontWeight: 500, color: score !== undefined ? scoreColor(score) : C.textMuted }}>
+                      <span style={{ fontFamily: mono, fontSize: 18, fontWeight: 600, color: score !== undefined ? scoreColor(score) : C.textMuted }}>
                         {score !== undefined ? score : '--'}
                       </span>
                     </div>
-                    <p style={{ fontSize: 11, color: C.textMuted, marginBottom: 8 }}>
+                    <p style={{ fontSize: 12, color: C.textMuted, marginBottom: 8 }}>
                       {route
                         ? `${formatDuration(route.duration)}  ·  ${formatDistance(route.distance)}`
                         : '— · — · —'}
                     </p>
-                    <div style={{ height: 4, background: C.elevated, borderRadius: 2 }}>
-                      <div style={{ height: '100%', width: score !== undefined ? `${score}%` : '0%', background: barColor, borderRadius: 2, transition: 'width 0.4s' }} />
+                    <div style={{ height: 6, background: C.elevated, borderRadius: 3 }}>
+                      <div style={{ height: '100%', width: score !== undefined ? `${score}%` : '0%', background: barColor, borderRadius: 3, transition: 'width 0.4s' }} />
                     </div>
                   </div>
                 )
               })}
               {tradeoffText && (
-                <p style={{ fontSize: 11, color: C.textMuted, marginTop: 2 }}>{tradeoffText}</p>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'rgba(0,212,170,0.05)', border: '1px solid rgba(0,212,170,0.1)', borderRadius: 8, padding: '8px 12px', marginTop: 2 }}>
+                  <span style={{ color: C.accent, fontSize: 13, flexShrink: 0, lineHeight: 1 }}>ℹ</span>
+                  <p style={{ fontSize: 13, color: C.textSec }}>{tradeoffText}</p>
+                </div>
               )}
             </section>
           )
@@ -1710,7 +1717,7 @@ export default function App() {
         <Divider />
 
         {/* ── Risk Score ── */}
-        <section style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 12, flexShrink: 0 }}>
+        <section style={{ padding: '20px 16px 16px', display: 'flex', flexDirection: 'column', gap: 12, flexShrink: 0 }}>
           <SectionLabel>Risk Score</SectionLabel>
           {(() => {
             const total  = riskScore?.total
@@ -1723,27 +1730,27 @@ export default function App() {
                   <span style={{ fontFamily: mono, fontSize: 56, fontWeight: 300, color, lineHeight: 1 }}>
                     {total !== undefined ? total : '--'}
                   </span>
-                  <p style={{ fontSize: 11, fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase', color }}>
+                  <p style={{ fontSize: 13, fontWeight: 600, letterSpacing: '0.12em', textTransform: 'uppercase', color }}>
                     {label}
                   </p>
-                  <div style={{ width: '100%', height: 6, background: C.elevated, borderRadius: 3, marginTop: 4 }}>
-                    <div style={{ height: '100%', width: total !== undefined ? `${total}%` : '0%', background: color, borderRadius: 3, transition: 'width 0.4s' }} />
+                  <div style={{ width: '100%', height: 8, background: C.elevated, borderRadius: 4, marginTop: 4 }}>
+                    <div style={{ height: '100%', width: total !== undefined ? `${total}%` : '0%', background: color, borderRadius: 4, transition: 'width 0.4s' }} />
                   </div>
                 </div>
                 {expl && (
-                  <p style={{ fontSize: 11, color: C.textSec, lineHeight: 1.5, textAlign: 'center' }}>{expl}</p>
+                  <p style={{ fontSize: 12, color: C.textSec, lineHeight: 1.6, textAlign: 'center', padding: '10px 14px' }}>{expl}</p>
                 )}
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                <div style={{ display: 'flex', flexDirection: 'column' }}>
                   {RISK_FACTORS.map(({ label: factorLabel }) => {
                     const score    = riskScore?.scores?.[factorLabel] ?? 0
                     const barColor = scoreColor(score)
                     return (
-                      <div key={factorLabel} style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                      <div key={factorLabel} style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
                         <span style={{ fontSize: 12, color: C.textMuted, width: 100, flexShrink: 0 }}>{factorLabel}</span>
-                        <div style={{ flex: 1, height: 3, background: C.elevated, borderRadius: 2 }}>
-                          <div style={{ height: '100%', width: `${score}%`, background: barColor, borderRadius: 2, transition: 'width 0.4s' }} />
+                        <div style={{ flex: 1, height: 6, background: C.elevated, borderRadius: 3 }}>
+                          <div style={{ height: '100%', width: `${score}%`, background: barColor, borderRadius: 3, transition: 'width 0.4s' }} />
                         </div>
-                        <span style={{ fontFamily: mono, fontSize: 11, color: barColor, width: 24, textAlign: 'right', flexShrink: 0 }}>{score}</span>
+                        <span style={{ fontFamily: mono, fontSize: 12, color: barColor, width: 24, textAlign: 'right', flexShrink: 0 }}>{score}</span>
                       </div>
                     )
                   })}
@@ -1758,7 +1765,7 @@ export default function App() {
         {/* ── ROUTE ALERTS ── */}
         {(routes.length > 0 || conditionsLoading) && (
           <>
-            <section style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 8, flexShrink: 0, opacity: dim, transition: 'opacity 0.25s' }}>
+            <section style={{ padding: '20px 16px 16px', display: 'flex', flexDirection: 'column', gap: 8, flexShrink: 0, opacity: dim, transition: 'opacity 0.25s' }}>
               <SectionLabel>Route Alerts</SectionLabel>
               {conditionsLoading ? (
                 <p style={{ fontSize: 12, color: C.textMuted }}>Analyzing weather data…</p>
@@ -1805,7 +1812,7 @@ export default function App() {
 
         {/* ── WEATHER TIMELINE ── */}
         <section
-          style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 10, flexShrink: 0, opacity: dim, transition: 'opacity 0.25s' }}
+          style={{ padding: '20px 16px 16px', display: 'flex', flexDirection: 'column', gap: 10, flexShrink: 0, opacity: dim, transition: 'opacity 0.25s' }}
         >
           <SectionLabel>Weather Timeline</SectionLabel>
 
@@ -1857,13 +1864,13 @@ export default function App() {
                         border: `1px solid ${C.borderPri}`,
                         borderLeft: `2px solid ${waypointRiskColor(pt)}`,
                         borderRadius: 8,
-                        padding: '10px 12px',
+                        padding: '10px 14px',
                       }}>
                         <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 4 }}>
                           <p style={{ fontSize: 13, color: C.textPri, fontWeight: 500 }}>
                             {pt.emoji} {pt.label}
                           </p>
-                          <span style={{ fontFamily: mono, fontSize: 10, color: C.textMuted, flexShrink: 0, marginLeft: 6 }}>
+                          <span style={{ fontFamily: mono, fontSize: 11, color: C.textMuted, flexShrink: 0, marginLeft: 6 }}>
                             {formatClockTime(displayDeptStr, pt.timeSeconds)}
                           </span>
                         </div>
@@ -1908,7 +1915,7 @@ export default function App() {
         <Divider />
 
         {/* ── Navigation Handoff ── */}
-        <section style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 8, flexShrink: 0 }}>
+        <section style={{ padding: '20px 16px 16px', display: 'flex', flexDirection: 'column', gap: 8, flexShrink: 0 }}>
           <SectionLabel>Open In</SectionLabel>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 }}>
             {NAV_APPS.map(app => (
