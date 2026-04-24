@@ -97,6 +97,13 @@ body {
   pointer-events: none;
 }
 
+/* Mobile: prevent iOS auto-zoom on input focus (requires font-size >= 16px) */
+@media (max-width: 768px) {
+  input, textarea, select {
+    font-size: 16px !important;
+  }
+}
+
 /* Mobile: push Mapbox controls clear of the bottom-sheet peek and top bar */
 @media (max-width: 768px) {
   /* Zoom buttons — sit above the 120px peek */
