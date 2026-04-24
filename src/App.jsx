@@ -46,12 +46,14 @@ function toDatetimeLocal(date) {
 
 // ── Bottom-sheet snap positions (mobile) ──────────────────────
 // Sheet is height:90dvh fixed at bottom:0. translateY moves it down.
-//   full  → translateY(0)           — 90 % of screen visible
+//   full  → translateY that keeps sheet top ≥ 100px below viewport top
+//            Sheet top without translate = h - 0.9h = 0.1h.
+//            To reach 100px clearance: translateY = max(0, 100 - 0.1h).
 //   half  → translateY(40dvh px)    — 50 % visible
 //   peek  → translateY(90dvh-120px) — only 120 px visible
 function getSnapPx(pos) {
   const h = window.innerHeight
-  if (pos === 'full') return 0
+  if (pos === 'full') return Math.max(0, Math.round(100 - h * 0.1))
   if (pos === 'half') return Math.round(h * 0.4)
   return Math.round(h * 0.9 - 120)  // peek
 }
@@ -860,7 +862,11 @@ export default function App() {
         markersRef.current.push(mA, mB)
         const bounds = new mapboxgl.LngLatBounds()
         fetched.forEach(r => r.geometry.coordinates.forEach(c => bounds.extend(c)))
-        map.fitBounds(bounds, { padding: 80 })
+        map.fitBounds(bounds, {
+          padding: window.innerWidth < 768
+            ? { top: 80, bottom: 180, left: 40, right: 40 }
+            : 80,
+        })
       }
 
       await loadAllConditions(fetched, useScheduled ? new Date(departureTime) : new Date())
@@ -1258,7 +1264,7 @@ export default function App() {
             onTouchEnd={handleSheetTouchEnd}
             style={{ flexShrink: 0, touchAction: 'none' }}
           >
-            <div style={{ display: 'flex', justifyContent: 'center', padding: '10px 0 6px' }}>
+            <div style={{ display: 'flex', justifyContent: 'center', padding: '12px 0 6px' }}>
               <div style={{ width: 40, height: 4, borderRadius: 2, background: 'rgba(255,255,255,0.2)' }} />
             </div>
 
