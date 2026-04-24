@@ -849,6 +849,7 @@ export default function App() {
       setActiveRouteIdx(0)
       activeRouteIdxRef.current = 0
       routesRef.current = fetched
+      if (isMobile) setTopBarCollapsed(true)
 
       const map = mapRef.current
       if (map) {
@@ -1151,7 +1152,39 @@ export default function App() {
             </button>
           </div>
 
-          {/* Collapsible inputs */}
+          {/* Collapsed compact summary — shown when routes loaded and bar is collapsed */}
+          {topBarCollapsed && routes.length > 0 && (
+            <button
+              onClick={() => setTopBarCollapsed(false)}
+              style={{
+                width: '100%', background: 'none', border: 'none', cursor: 'pointer',
+                padding: '0 14px 10px', textAlign: 'left',
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                <span style={{
+                  fontSize: 14, color: C.textSec,
+                  overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                  maxWidth: '42%',
+                }}>
+                  {originText.split(',')[0]}
+                </span>
+                <span style={{ color: C.accent, fontSize: 14, flexShrink: 0 }}>→</span>
+                <span style={{
+                  fontSize: 14, color: C.textSec,
+                  overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                  flex: 1,
+                }}>
+                  {destText.split(',')[0]}
+                </span>
+                <span style={{ fontSize: 12, color: C.accent, flexShrink: 0, marginLeft: 8 }}>
+                  Edit
+                </span>
+              </div>
+            </button>
+          )}
+
+          {/* Full inputs — shown when expanded (no routes yet, or user tapped Edit) */}
           {!topBarCollapsed && (
             <div style={{ padding: '0 14px 12px', display: 'flex', flexDirection: 'column', gap: 8 }}>
               {/* Origin */}
