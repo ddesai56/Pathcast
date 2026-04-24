@@ -994,6 +994,23 @@ export default function App() {
     if (isMobile && routes.length > 0) setSheetPos('half')
   }, [routes.length, isMobile]) // eslint-disable-line react-hooks/exhaustive-deps
 
+  // ── Mobile: hide sheet instantly when search panel opens; restore when it closes ──
+  useEffect(() => {
+    if (!isMobile) return
+    const el = sheetRef.current
+    if (!el) return
+    if (!topBarCollapsed) {
+      // Search panel expanding — snap sheet to peek with no animation so it
+      // doesn't fight with the keyboard or the expanded input area.
+      el.style.transition = 'none'
+      el.style.transform  = `translateY(${getSnapPx('peek')}px)`
+      setSheetPos('peek')
+    } else if (routesRef.current.length > 0) {
+      // Search panel collapsed and routes exist — slide sheet back to half.
+      setSheetPos('half')
+    }
+  }, [topBarCollapsed, isMobile]) // eslint-disable-line react-hooks/exhaustive-deps
+
   // ── Swap origin ↔ destination ──
   function handleSwap() {
     const tmpText   = originText
@@ -1010,6 +1027,7 @@ export default function App() {
 
   // ── Bottom-sheet touch drag ──
   function handleSheetTouchStart(e) {
+    if (!topBarCollapsed) return  // search panel open — block sheet drag
     const dr  = dragRef.current
     const el  = sheetRef.current
     if (!el) return
