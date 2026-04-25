@@ -989,9 +989,10 @@ export default function App() {
     el.style.transform  = `translateY(${getSnapPx(sheetPos)}px)`
   }, [sheetPos])
 
-  // ── Mobile: auto-snap to half after routes are found ──
+  // ── Mobile: auto-snap to peek after routes are found ──
+  // Starts at peek so the user sees the compact route summary; they can drag up for details.
   useEffect(() => {
-    if (isMobile && routes.length > 0) setSheetPos('half')
+    if (isMobile && routes.length > 0) setSheetPos('peek')
   }, [routes.length, isMobile]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Mobile: hide sheet instantly when search panel opens; restore when it closes ──
@@ -1027,7 +1028,8 @@ export default function App() {
 
   // ── Bottom-sheet touch drag ──
   function handleSheetTouchStart(e) {
-    if (!topBarCollapsed) return  // search panel open — block sheet drag
+    if (!topBarCollapsed) return      // search panel open — block sheet drag
+    if (routes.length === 0) return   // no results yet — sheet locked at peek
     const dr  = dragRef.current
     const el  = sheetRef.current
     if (!el) return
@@ -1289,25 +1291,39 @@ export default function App() {
             {/* Peek content */}
             <div style={{ padding: '2px 16px 12px' }}>
               {routes.length === 0 ? (
-                <p style={{ fontSize: 13, color: C.textSec, textAlign: 'center', paddingTop: 4 }}>
+                <p style={{ fontSize: 14, color: C.textMuted, textAlign: 'center', paddingTop: 4 }}>
                   {loading ? 'Finding routes…' : 'Search for a route to begin'}
                 </p>
-              ) : (
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                  <div>
-                    <p style={{ fontSize: 13, fontWeight: 500, color: C.textPri }}>
-                      {activeRouteIdx === 0 ? 'Route A' : 'Route B'}
-                      {routes[activeRouteIdx] && ` · ${formatDuration(routes[activeRouteIdx].duration)}`}
-                    </p>
-                    <p style={{ fontSize: 10, color: C.textMuted, marginTop: 2 }}>Swipe up for details</p>
+              ) : (() => {
+                // Parse raw numbers from pre-formatted strings ("3,240 ft" → 3240)
+                const parseNum = (str) => parseFloat((str ?? '').replace(/[^0-9.]/g, '')) || 0
+                const gainNum  = parseNum(elev?.gainFt)
+                const maxNum   = parseNum(elev?.maxFt)
+                const showElev = elev && (gainNum > 3000 || maxNum > 6000)
+                return (
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <div>
+                      <p style={{ fontSize: 13, fontWeight: 500, color: C.textPri }}>
+                        {activeRouteIdx === 0 ? 'Route A' : 'Route B'}
+                        {routes[activeRouteIdx] && ` · ${formatDuration(routes[activeRouteIdx].duration)}`}
+                      </p>
+                      {showElev && (
+                        <p style={{ fontSize: 12, color: C.textSec, marginTop: 2 }}>
+                          <span style={{ fontFamily: mono }}>+ {Math.round(gainNum).toLocaleString()} ft</span>
+                          <span style={{ color: C.textMuted }}>{' · '}</span>
+                          <span style={{ fontFamily: mono }}>▲ {Math.round(maxNum).toLocaleString()} ft</span>
+                        </p>
+                      )}
+                      <p style={{ fontSize: 10, color: C.textMuted, marginTop: showElev ? 1 : 2 }}>Swipe up for details</p>
+                    </div>
+                    {riskScore && (
+                      <span style={{ fontFamily: mono, fontSize: 22, fontWeight: 600, color: scoreColor(riskScore.total) }}>
+                        {riskScore.total}
+                      </span>
+                    )}
                   </div>
-                  {riskScore && (
-                    <span style={{ fontFamily: mono, fontSize: 22, fontWeight: 600, color: scoreColor(riskScore.total) }}>
-                      {riskScore.total}
-                    </span>
-                  )}
-                </div>
-              )}
+                )
+              })()}
             </div>
             <div style={{ height: 1, background: C.borderPri }} />
           </div>
@@ -1322,6 +1338,7 @@ export default function App() {
               display: 'flex', flexDirection: 'column', gap: 14,
             }}
           >
+          {routes.length > 0 && <>
 
             {/* Route comparison (compact) */}
             {(() => {
@@ -1550,6 +1567,7 @@ export default function App() {
               )
             )}
 
+          </>}{/* end routes.length > 0 */}
           </div>{/* end scrollable body */}
         </div>{/* end bottom sheet */}
 
