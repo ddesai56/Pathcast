@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback, useEffect, useLayoutEffect } from 'react'
 import mapboxgl from 'mapbox-gl'
 import { Button } from '@/components/ui/button'
-import { Navigation, MapPin, ChevronDown, ArrowUpDown } from 'lucide-react'
+import { Navigation, MapPin, ChevronDown, ArrowUpDown, Clock, Layers } from 'lucide-react'
 import MapView from '@/components/MapView'
 import AutocompleteInput from '@/components/AutocompleteInput'
 import ElevationChart from '@/components/ElevationChart'
@@ -62,10 +62,10 @@ function getSnapPx(pos) {
 // dark:true → teal inactive tint (Dark / Satellite group)
 // Order: Dark · Satellite · divider · Streets · Outdoors
 const MAP_STYLES = [
-  { id: 'dark',      label: 'Dark',      url: 'mapbox://styles/mapbox/dark-v11',              dark: true  },
-  { id: 'satellite', label: 'Satellite', url: 'mapbox://styles/mapbox/satellite-streets-v12', dark: true  },
-  { id: 'streets',   label: 'Streets',   url: 'mapbox://styles/mapbox/streets-v12',           dark: false },
-  { id: 'outdoors',  label: 'Outdoors',  url: 'mapbox://styles/mapbox/outdoors-v12',          dark: false },
+  { id: 'dark',      label: 'Dark',      url: 'mapbox://styles/mapbox/dark-v11',              dark: true,  tileColor: '#1a1e28' },
+  { id: 'satellite', label: 'Satellite', url: 'mapbox://styles/mapbox/satellite-streets-v12', dark: true,  tileColor: '#2d4a2d' },
+  { id: 'streets',   label: 'Streets',   url: 'mapbox://styles/mapbox/streets-v12',           dark: false, tileColor: '#2a2e3a' },
+  { id: 'outdoors',  label: 'Outdoors',  url: 'mapbox://styles/mapbox/outdoors-v12',          dark: false, tileColor: '#1e3040' },
 ]
 
 // ── Re-add only the GeoJSON route sources/layers after a style change. ─
@@ -428,6 +428,109 @@ function MapStyleToggle({ activeStyleId, onStyleChange, style: wrapStyle }) {
   )
 }
 
+// ── Mobile layers button + style picker ──────────────────────
+function MobileLayersBtn({ activeStyleId, isOpen, onClick }) {
+  const isCustom = activeStyleId !== 'dark'
+  return (
+    <button
+      onClick={onClick}
+      title="Map style"
+      style={{
+        width: 40, height: 40, borderRadius: '50%',
+        background: 'rgba(19,22,30,0.9)',
+        border: `1px solid rgba(255,255,255,0.12)`,
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        cursor: 'pointer',
+        color: isCustom || isOpen ? '#00d4aa' : '#8b90a0',
+        boxShadow: '0 2px 12px rgba(0,0,0,0.5)',
+        transition: 'color 0.15s',
+      }}
+    >
+      <Layers size={20} />
+    </button>
+  )
+}
+
+const STYLE_TILE_ICONS = {
+  dark: (
+    <svg viewBox="0 0 24 24" fill="currentColor" width="32" height="32">
+      <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+    </svg>
+  ),
+  satellite: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="32" height="32">
+      <circle cx="12" cy="12" r="3"/>
+      <path d="M6.3 6.3a8 8 0 0 0 0 11.4M17.7 6.3a8 8 0 0 1 0 11.4"/>
+      <path d="M3.5 3.5a13 13 0 0 0 0 17M20.5 3.5a13 13 0 0 1 0 17"/>
+    </svg>
+  ),
+  streets: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="32" height="32">
+      <line x1="12" y1="2" x2="12" y2="22"/>
+      <line x1="2" y1="12" x2="22" y2="12"/>
+      <rect x="6" y="6" width="12" height="12" rx="1"/>
+    </svg>
+  ),
+  outdoors: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="32" height="32">
+      <polygon points="3 20 9 4 15 14 18 10 21 20"/>
+    </svg>
+  ),
+}
+
+function MobileStylePicker({ activeStyleId, onSelect, onClose }) {
+  return (
+    <>
+      {/* Full-screen tap-away backdrop */}
+      <div
+        onClick={onClose}
+        style={{ position: 'fixed', inset: 0, zIndex: 125 }}
+      />
+      {/* Picker card — anchored top-right below the button */}
+      <div style={{
+        position: 'fixed', top: 160, right: 12, zIndex: 126,
+        background: '#1a1e28',
+        border: '1px solid rgba(255,255,255,0.12)',
+        borderRadius: 16, padding: 16,
+        boxShadow: '0 8px 32px rgba(0,0,0,0.4)',
+        display: 'grid', gridTemplateColumns: 'repeat(2, 72px)', gap: 10,
+      }}>
+        {MAP_STYLES.map(s => {
+          const active = s.id === activeStyleId
+          return (
+            <button
+              key={s.id}
+              onClick={() => { onSelect(s); onClose() }}
+              style={{
+                display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6,
+                background: 'none', border: 'none', padding: 0, cursor: 'pointer',
+              }}
+            >
+              <div style={{
+                width: 72, height: 72, borderRadius: 10,
+                background: '#222736',
+                border: active ? '2px solid #00d4aa' : '1px solid rgba(255,255,255,0.08)',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                color: active ? '#00d4aa' : '#8b90a0',
+                transition: 'border-color 0.15s, color 0.15s',
+              }}>
+                {STYLE_TILE_ICONS[s.id]}
+              </div>
+              <span style={{
+                fontSize: 11, color: active ? '#00d4aa' : '#8b90a0',
+                fontFamily: "'DM Sans', sans-serif",
+                transition: 'color 0.15s',
+              }}>
+                {s.label}
+              </span>
+            </button>
+          )
+        })}
+      </div>
+    </>
+  )
+}
+
 // ── Navigation handoff button ─────────────────────────────────
 // Dark card: single centered brand-colored label.
 function NavBtn({ label, labelColor, tooltip, disabled, onClick }) {
@@ -605,6 +708,11 @@ export default function App() {
   const [useScheduled,  setUseScheduled]  = useState(false)
   const [departureTime, setDepartureTime] = useState(() => toDatetimeLocal(new Date()))
 
+  // Mobile inline departure picker (separate from desktop toggle)
+  const [mobilePickerOpen,  setMobilePickerOpen]  = useState(false)
+  const [pickerScheduled,   setPickerScheduled]   = useState(false)
+  const [pickerTime,        setPickerTime]         = useState('')
+
   // Route state
   const [routes,         setRoutes]         = useState([])
   const [activeRouteIdx, setActiveRouteIdx] = useState(0)
@@ -622,9 +730,10 @@ export default function App() {
   const [activeStyleId, setActiveStyleId] = useState('dark')
 
   // ── Mobile UI state ──
-  const [isMobile,        setIsMobile]        = useState(() => window.innerWidth < 768)
-  const [topBarCollapsed, setTopBarCollapsed] = useState(false)
-  const [sheetPos,        setSheetPos]        = useState('peek') // 'peek'|'half'|'full'
+  const [isMobile,          setIsMobile]          = useState(() => window.innerWidth < 768)
+  const [topBarCollapsed,   setTopBarCollapsed]   = useState(false)
+  const [sheetPos,          setSheetPos]          = useState('peek') // 'peek'|'half'|'full'
+  const [stylePickerOpen,   setStylePickerOpen]   = useState(false)
 
   // Stable refs
   const mapRef              = useRef(null)
@@ -1148,14 +1257,25 @@ export default function App() {
           <MapView onMapReady={handleMapReady} />
         </div>
 
-        {/* Style toggle — top-right, clears the logo row of the top bar */}
-        <div style={{
-          position: 'absolute', zIndex: 120,
-          top: 'calc(env(safe-area-inset-top, 0px) + 54px)',
-          right: 10,
-        }}>
-          <MapStyleToggle activeStyleId={activeStyleId} onStyleChange={handleStyleChange} />
-        </div>
+        {/* Layers button — only when top bar is collapsed (route loaded or manually collapsed) */}
+        {topBarCollapsed && (
+          <div style={{ position: 'fixed', zIndex: 130, top: 100, right: 12 }}>
+            <MobileLayersBtn
+              activeStyleId={activeStyleId}
+              isOpen={stylePickerOpen}
+              onClick={() => setStylePickerOpen(v => !v)}
+            />
+          </div>
+        )}
+
+        {/* Style picker overlay — rendered at root level so backdrop covers everything */}
+        {stylePickerOpen && (
+          <MobileStylePicker
+            activeStyleId={activeStyleId}
+            onSelect={handleStyleChange}
+            onClose={() => setStylePickerOpen(false)}
+          />
+        )}
 
         {/* ── Top search bar ── */}
         <div style={{
@@ -1327,6 +1447,129 @@ export default function App() {
             </div>
             <div style={{ height: 1, background: C.borderPri }} />
           </div>
+
+          {/* ── Departure row + inline picker (non-scrollable, routes only) ── */}
+          {routes.length > 0 && (() => {
+            // Format departure label for the row
+            const deptDate  = new Date(departureTime)
+            const now       = new Date()
+            const sameDay   = deptDate.toDateString() === now.toDateString()
+            const timeStr   = deptDate.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+            const dateStr   = sameDay ? timeStr
+              : `${deptDate.toLocaleDateString([], { month: 'short', day: 'numeric' })} ${timeStr}`
+            const deptLabel = useScheduled ? `Depart ${dateStr}` : 'Depart now'
+
+            function openPicker() {
+              setPickerScheduled(useScheduled)
+              setPickerTime(departureTime)
+              setMobilePickerOpen(true)
+            }
+            function applyPicker() {
+              if (pickerScheduled) {
+                setUseScheduled(true)
+                setDepartureTime(pickerTime)
+                if (routesRef.current.length > 0) loadAllConditions(routesRef.current, new Date(pickerTime))
+              } else {
+                setUseScheduled(false)
+                if (routesRef.current.length > 0) loadAllConditions(routesRef.current, new Date())
+              }
+              setMobilePickerOpen(false)
+            }
+
+            return (
+              <div style={{ flexShrink: 0, borderBottom: `1px solid ${C.borderPri}` }}>
+                {/* Summary row — tap to open picker */}
+                <div
+                  onClick={mobilePickerOpen ? undefined : openPicker}
+                  style={{
+                    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                    padding: '12px 16px', background: C.cardBg, cursor: 'pointer',
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <Clock size={14} style={{ color: C.textSec, flexShrink: 0 }} />
+                    <span style={{ fontSize: 14, color: C.textPri, fontFamily: "'DM Sans', sans-serif" }}>
+                      {deptLabel}
+                    </span>
+                  </div>
+                  <span
+                    onClick={(e) => { e.stopPropagation(); mobilePickerOpen ? setMobilePickerOpen(false) : openPicker() }}
+                    style={{ fontSize: 12, color: C.accent, cursor: 'pointer' }}
+                  >
+                    {mobilePickerOpen ? 'Close' : 'Change'}
+                  </span>
+                </div>
+
+                {/* Inline picker — expands below row */}
+                {mobilePickerOpen && (
+                  <div style={{ padding: '12px 16px 14px', background: C.cardBg, display: 'flex', flexDirection: 'column', gap: 10 }}>
+                    {/* Now / Schedule toggle */}
+                    <div
+                      onClick={() => setPickerScheduled(v => !v)}
+                      style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer', userSelect: 'none' }}
+                    >
+                      <div style={{
+                        width: 32, height: 18, borderRadius: 99, flexShrink: 0,
+                        background: pickerScheduled ? C.accent : C.elevated,
+                        position: 'relative', transition: 'background 0.2s',
+                      }}>
+                        <div style={{
+                          position: 'absolute', top: 3,
+                          left: pickerScheduled ? 17 : 3,
+                          width: 12, height: 12, borderRadius: '50%',
+                          background: '#fff', transition: 'left 0.2s',
+                        }} />
+                      </div>
+                      <span style={{ fontSize: 13, color: pickerScheduled ? C.textPri : C.textMuted }}>
+                        Schedule departure
+                      </span>
+                    </div>
+
+                    {/* Datetime input */}
+                    {pickerScheduled && (
+                      <input
+                        type="datetime-local"
+                        value={pickerTime}
+                        onChange={(e) => setPickerTime(e.target.value)}
+                        style={{
+                          width: '100%', background: C.elevated,
+                          border: `1px solid ${C.borderSec}`, borderRadius: 8,
+                          color: C.textPri, fontFamily: "'DM Sans', sans-serif",
+                          fontSize: 13, padding: '8px 10px', colorScheme: 'dark',
+                        }}
+                      />
+                    )}
+
+                    {/* Set / Cancel */}
+                    <div style={{ display: 'flex', gap: 8 }}>
+                      <button
+                        onClick={applyPicker}
+                        style={{
+                          flex: 1, padding: '9px 0', borderRadius: 8, border: 'none',
+                          background: C.accent, color: '#000',
+                          fontSize: 13, fontWeight: 600, cursor: 'pointer',
+                          fontFamily: "'DM Sans', sans-serif",
+                        }}
+                      >
+                        Set
+                      </button>
+                      <button
+                        onClick={() => setMobilePickerOpen(false)}
+                        style={{
+                          flex: 1, padding: '9px 0', borderRadius: 8,
+                          border: `1px solid ${C.borderSec}`, background: 'transparent',
+                          color: C.textSec, fontSize: 13, cursor: 'pointer',
+                          fontFamily: "'DM Sans', sans-serif",
+                        }}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )
+          })()}
 
           {/* ── Scrollable sheet body ── */}
           <div
