@@ -24,8 +24,13 @@ const WEATHER_CODES = {
   99: { label: 'Thunderstorm',  emoji: '⛈️' },
 }
 
-export function getWeatherInfo(code) {
-  return WEATHER_CODES[code] ?? WEATHER_CODES[0]
+export function getWeatherInfo(code, isNight = false) {
+  const base = WEATHER_CODES[code] ?? WEATHER_CODES[0]
+  if (!isNight) return base
+  // Night overrides: clear sky → moon, partly cloudy → night cloud
+  if (code === 0)                  return { ...base, emoji: '🌙' }
+  if (code === 1 || code === 2 || code === 3) return { ...base, emoji: '🌥️' }
+  return base
 }
 
 // ── Coordinate sampling ──────────────────────────────────────
@@ -177,6 +182,11 @@ export async function fetchWeatherData(timePoints, departureTime = new Date()) {
     const precip  = result?.precipitation  ?? 0
     const tempC   = result?.temperature_2m ?? 15
 
+    // Night = before 6am or after 8pm local time at departure + offset
+    const arrivalTime = new Date(departureTime.getTime() + timePoints[i].timeSeconds * 1000)
+    const hour        = arrivalTime.getHours()
+    const isNight     = hour < 6 || hour > 20
+
     return {
       coords:       timePoints[i].coords, // [lng, lat] — needed for map markers
       timeSeconds:  timePoints[i].timeSeconds,
@@ -186,7 +196,7 @@ export async function fetchWeatherData(timePoints, departureTime = new Date()) {
       windMph:      Math.round(windKph * 0.621),
       visibilityMi: parseFloat((visM / 1609).toFixed(1)),
       weatherCode:  code,
-      ...getWeatherInfo(code),
+      ...getWeatherInfo(code, isNight),
     }
   })
 }

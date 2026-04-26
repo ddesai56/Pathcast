@@ -371,6 +371,32 @@ const Divider = () => (
   <div style={{ height: 1, background: 'rgba(255,255,255,0.1)', flexShrink: 0 }} />
 )
 
+// ── Collapsible section header (teal bar + title + chevron) ──
+function AccordionLabel({ children, open, onToggle }) {
+  return (
+    <div
+      onClick={onToggle}
+      style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        cursor: 'pointer', userSelect: 'none',
+        marginBottom: open ? 10 : 0, transition: 'margin-bottom 0.25s ease',
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <div style={{ width: 3, height: 14, background: C.accent, borderRadius: 1, flexShrink: 0 }} />
+        <p style={{ fontSize: 12, fontWeight: 600, letterSpacing: '0.1em', textTransform: 'uppercase', color: C.textPri }}>
+          {children}
+        </p>
+      </div>
+      <span style={{
+        fontSize: 10, color: C.textMuted, display: 'inline-block',
+        transform: open ? 'rotate(0deg)' : 'rotate(-90deg)',
+        transition: 'transform 0.2s ease',
+      }}>▾</span>
+    </div>
+  )
+}
+
 // ── Map style toggle — frosted dark pill ───────────────────────
 // Dark · Satellite | Streets · Outdoors
 // A thin divider separates the two groups visually.
@@ -708,6 +734,11 @@ export default function App() {
   const [useScheduled,  setUseScheduled]  = useState(false)
   const [departureTime, setDepartureTime] = useState(() => toDatetimeLocal(new Date()))
 
+  // Route filter options — passed as Mapbox exclude params
+  const [avoidTolls,    setAvoidTolls]    = useState(false)
+  const [avoidHighways, setAvoidHighways] = useState(false)
+  const [avoidFerries,  setAvoidFerries]  = useState(false)
+
   // Mobile inline departure picker (separate from desktop toggle)
   const [mobilePickerOpen,  setMobilePickerOpen]  = useState(false)
   const [pickerScheduled,   setPickerScheduled]   = useState(false)
@@ -728,6 +759,13 @@ export default function App() {
 
   // ── Map style ──
   const [activeStyleId, setActiveStyleId] = useState('dark')
+
+  // ── Accordion open/closed state (desktop + mobile) ──
+  const [deptOpen,           setDeptOpen]           = useState(true)
+  const [routeOptOpen,       setRouteOptOpen]       = useState(true)
+  const [mobileRouteOptOpen, setMobileRouteOptOpen] = useState(true)
+  // True when the user edits settings after a route was already searched
+  const [needsResearch,      setNeedsResearch]      = useState(false)
 
   // ── Mobile UI state ──
   const [isMobile,          setIsMobile]          = useState(() => window.innerWidth < 768)
@@ -932,6 +970,7 @@ export default function App() {
     const dst = destCoordsRef.current
     if (!org || !dst) return
 
+    setNeedsResearch(false)
     setLoading(true)
     setRoutes([])
     setAllConditions([])
@@ -944,11 +983,19 @@ export default function App() {
     clearElevHoverMarker()
 
     try {
+      // Build exclude param from active filters
+      const excludeParts = [
+        avoidTolls    && 'toll',
+        avoidHighways && 'motorway',
+        avoidFerries  && 'ferry',
+      ].filter(Boolean)
+      const excludeParam = excludeParts.length > 0 ? `&exclude=${excludeParts.join(',')}` : ''
+
       const url =
         `https://api.mapbox.com/directions/v5/mapbox/driving/` +
         `${org[0]},${org[1]};${dst[0]},${dst[1]}` +
         `?alternatives=true&geometries=geojson&overview=full&steps=false` +
-        `&access_token=${TOKEN}`
+        `${excludeParam}&access_token=${TOKEN}`
 
       const res = await fetch(url)
       if (!res.ok) throw new Error(`Route service error (${res.status})`)
@@ -956,10 +1003,20 @@ export default function App() {
       const fetched = (data.routes ?? []).slice(0, 2)
       if (fetched.length === 0) throw new Error('No routes found between these locations')
 
+      // Toast if any filters are active
+      if (excludeParts.length > 0) {
+        const names = excludeParts.map(p => p === 'toll' ? 'tolls' : p === 'motorway' ? 'highways' : 'ferries')
+        setToast(`Route calculated avoiding ${names.join(', ')}`)
+      }
+
       setRoutes(fetched)
       setActiveRouteIdx(0)
       activeRouteIdxRef.current = 0
       routesRef.current = fetched
+      // Auto-collapse sidebar sections so results get more space
+      setDeptOpen(false)
+      setRouteOptOpen(false)
+      setMobileRouteOptOpen(false)
       if (isMobile) setTopBarCollapsed(true)
 
       const map = mapRef.current
@@ -1028,6 +1085,7 @@ export default function App() {
     // Sync the input to "now" whenever the user enables scheduling so it starts fresh
     if (val) setDepartureTime(toDatetimeLocal(new Date()))
     if (routesRef.current.length > 0) {
+      setNeedsResearch(true)
       loadAllConditions(routesRef.current, new Date())
     }
   }
@@ -1036,6 +1094,7 @@ export default function App() {
   function handleDepartureTimeChange(value) {
     setDepartureTime(value)
     if (routesRef.current.length > 0) {
+      setNeedsResearch(true)
       loadAllConditions(routesRef.current, new Date(value))
     }
   }
@@ -1583,6 +1642,61 @@ export default function App() {
           >
           {routes.length > 0 && <>
 
+            {/* ── Mobile Route Options ── */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
+              <AccordionLabel open={mobileRouteOptOpen} onToggle={() => setMobileRouteOptOpen(v => !v)}>
+                Route Options
+              </AccordionLabel>
+              <div style={{
+                overflow: 'hidden',
+                maxHeight: mobileRouteOptOpen ? 120 : 0,
+                transition: 'max-height 0.25s ease',
+                display: 'flex', flexDirection: 'column', gap: 8,
+              }}>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                  {[
+                    { label: 'Avoid Tolls',    active: avoidTolls,    set: setAvoidTolls    },
+                    { label: 'Avoid Highways', active: avoidHighways, set: setAvoidHighways  },
+                    { label: 'Avoid Ferries',  active: avoidFerries,  set: setAvoidFerries   },
+                  ].map(({ label, active, set }) => (
+                    <button
+                      key={label}
+                      onClick={() => {
+                        set(v => !v)
+                        if (routesRef.current.length > 0) setNeedsResearch(true)
+                      }}
+                      style={{
+                        padding: '5px 11px', borderRadius: 99, fontSize: 11, cursor: 'pointer',
+                        fontFamily: "'DM Sans', sans-serif",
+                        background: active ? 'rgba(0,212,170,0.1)' : C.cardBg,
+                        border:     active ? '1px solid rgba(0,212,170,0.3)' : `1px solid ${C.borderSec}`,
+                        color:      active ? C.accent : C.textSec,
+                        transition: 'background 0.15s, border-color 0.15s, color 0.15s',
+                      }}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                {needsResearch && (
+                  <button
+                    onClick={handleFindRoute}
+                    style={{
+                      width: '100%', padding: '7px 0',
+                      background: 'transparent',
+                      border: `1px solid ${C.accent}`,
+                      borderRadius: 8,
+                      color: C.accent, fontSize: 10, fontWeight: 600,
+                      cursor: 'pointer', fontFamily: "'DM Sans', sans-serif",
+                      letterSpacing: '0.05em',
+                    }}
+                  >
+                    Re-search with new settings
+                  </button>
+                )}
+              </div>
+            </div>
+
             {/* Route comparison (compact) */}
             {(() => {
               const sA = allRiskScores[0]?.total
@@ -1899,51 +2013,146 @@ export default function App() {
         <Divider />
 
         {/* ── Departure Time ── */}
-        <section style={{ padding: '20px 16px 16px', display: 'flex', flexDirection: 'column', gap: 10, flexShrink: 0 }}>
-          <SectionLabel>Departure Time</SectionLabel>
+        <section style={{ padding: '20px 16px 16px', display: 'flex', flexDirection: 'column', gap: 0, flexShrink: 0 }}>
+          <AccordionLabel open={deptOpen} onToggle={() => setDeptOpen(v => !v)}>
+            Departure Time
+          </AccordionLabel>
 
-          {/* Toggle row */}
-          <div
-            onClick={() => handleScheduleToggle(!useScheduled)}
-            style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer', userSelect: 'none' }}
-          >
-            {/* Pill */}
-            <div style={{
-              width: 32, height: 18, borderRadius: 99, flexShrink: 0,
-              background: useScheduled ? C.accent : C.elevated,
-              position: 'relative', transition: 'background 0.2s',
-            }}>
+          {/* Collapsible content */}
+          <div style={{
+            overflow: 'hidden',
+            maxHeight: deptOpen ? 220 : 0,
+            transition: 'max-height 0.25s ease',
+            display: 'flex', flexDirection: 'column', gap: 10,
+          }}>
+            {/* Toggle row */}
+            <div
+              onClick={() => handleScheduleToggle(!useScheduled)}
+              style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer', userSelect: 'none' }}
+            >
+              {/* Pill */}
               <div style={{
-                position: 'absolute', top: 3,
-                left: useScheduled ? 17 : 3,
-                width: 12, height: 12, borderRadius: '50%',
-                background: '#fff', transition: 'left 0.2s',
-              }} />
+                width: 32, height: 18, borderRadius: 99, flexShrink: 0,
+                background: useScheduled ? C.accent : C.elevated,
+                position: 'relative', transition: 'background 0.2s',
+              }}>
+                <div style={{
+                  position: 'absolute', top: 3,
+                  left: useScheduled ? 17 : 3,
+                  width: 12, height: 12, borderRadius: '50%',
+                  background: '#fff', transition: 'left 0.2s',
+                }} />
+              </div>
+              <span style={{ fontSize: 12, color: useScheduled ? C.textPri : C.textMuted }}>
+                Schedule departure
+              </span>
             </div>
-            <span style={{ fontSize: 12, color: useScheduled ? C.textPri : C.textMuted }}>
-              Schedule departure
-            </span>
-          </div>
 
-          {/* Datetime input — only visible when scheduling is on */}
-          {useScheduled && (
-            <input
-              type="datetime-local"
-              value={departureTime}
-              onChange={(e) => handleDepartureTimeChange(e.target.value)}
-              style={{
-                width: '100%',
-                background: C.cardBg,
-                border: `1px solid ${C.borderSec}`,
-                borderRadius: 8,
-                color: C.textPri,
-                fontFamily: "'DM Sans', sans-serif",
-                fontSize: 13,
-                padding: '8px 10px',
-                colorScheme: 'dark',
-              }}
-            />
-          )}
+            {/* Datetime input — only visible when scheduling is on */}
+            {useScheduled && (
+              <input
+                type="datetime-local"
+                value={departureTime}
+                onChange={(e) => handleDepartureTimeChange(e.target.value)}
+                style={{
+                  width: '100%',
+                  background: C.cardBg,
+                  border: `1px solid ${C.borderSec}`,
+                  borderRadius: 8,
+                  color: C.textPri,
+                  fontFamily: "'DM Sans', sans-serif",
+                  fontSize: 13,
+                  padding: '8px 10px',
+                  colorScheme: 'dark',
+                }}
+              />
+            )}
+
+            {/* Re-search button — shown when settings changed after a route was found */}
+            {needsResearch && routes.length > 0 && (
+              <button
+                onClick={handleFindRoute}
+                style={{
+                  width: '100%', padding: '7px 0', marginTop: 2,
+                  background: 'transparent',
+                  border: `1px solid ${C.accent}`,
+                  borderRadius: 8,
+                  color: C.accent, fontSize: 10, fontWeight: 600,
+                  cursor: 'pointer', fontFamily: "'DM Sans', sans-serif",
+                  letterSpacing: '0.05em',
+                  transition: 'background 0.15s',
+                }}
+                onMouseEnter={e => e.currentTarget.style.background = 'rgba(0,212,170,0.08)'}
+                onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+              >
+                Re-search with new settings
+              </button>
+            )}
+          </div>
+        </section>
+
+        <Divider />
+
+        {/* ── Route Options ── */}
+        <section style={{ padding: '20px 16px 16px', display: 'flex', flexDirection: 'column', gap: 0, flexShrink: 0 }}>
+          <AccordionLabel open={routeOptOpen} onToggle={() => setRouteOptOpen(v => !v)}>
+            Route Options
+          </AccordionLabel>
+
+          {/* Collapsible content */}
+          <div style={{
+            overflow: 'hidden',
+            maxHeight: routeOptOpen ? 120 : 0,
+            transition: 'max-height 0.25s ease',
+            display: 'flex', flexDirection: 'column', gap: 10,
+          }}>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+              {[
+                { label: 'Avoid Tolls',     active: avoidTolls,    set: setAvoidTolls    },
+                { label: 'Avoid Highways',  active: avoidHighways, set: setAvoidHighways  },
+                { label: 'Avoid Ferries',   active: avoidFerries,  set: setAvoidFerries   },
+              ].map(({ label, active, set }) => (
+                <button
+                  key={label}
+                  onClick={() => {
+                    set(v => !v)
+                    if (routesRef.current.length > 0) setNeedsResearch(true)
+                  }}
+                  style={{
+                    padding: '5px 12px', borderRadius: 99, fontSize: 12, cursor: 'pointer',
+                    fontFamily: "'DM Sans', sans-serif",
+                    background: active ? 'rgba(0,212,170,0.1)' : C.cardBg,
+                    border:     active ? '1px solid rgba(0,212,170,0.3)' : `1px solid ${C.borderSec}`,
+                    color:      active ? C.accent : C.textSec,
+                    transition: 'background 0.15s, border-color 0.15s, color 0.15s',
+                  }}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+
+            {/* Re-search button */}
+            {needsResearch && routes.length > 0 && (
+              <button
+                onClick={handleFindRoute}
+                style={{
+                  width: '100%', padding: '7px 0',
+                  background: 'transparent',
+                  border: `1px solid ${C.accent}`,
+                  borderRadius: 8,
+                  color: C.accent, fontSize: 10, fontWeight: 600,
+                  cursor: 'pointer', fontFamily: "'DM Sans', sans-serif",
+                  letterSpacing: '0.05em',
+                  transition: 'background 0.15s',
+                }}
+                onMouseEnter={e => e.currentTarget.style.background = 'rgba(0,212,170,0.08)'}
+                onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+              >
+                Re-search with new settings
+              </button>
+            )}
+          </div>
         </section>
 
         <Divider />
