@@ -11,6 +11,7 @@ import {
   sampleCoords, sampleByTime,
   fetchWeatherData, fetchElevationData,
   processElevation, getNotableWaypoints, getConditionCallout,
+  computeRouteRisk,
 } from '@/utils/weatherElevation'
 
 mapboxgl.accessToken = import.meta.env.VITE_MAPBOX_TOKEN
@@ -107,11 +108,12 @@ function redrawRouteLines(map, routeData, activeIdx) {
 }
 
 const RISK_FACTORS = [
-  { label: 'Precipitation', weight: 35 },
-  { label: 'Elevation',     weight: 25 },
-  { label: 'Visibility',    weight: 20 },
-  { label: 'Wind',          weight: 10 },
-  { label: 'Temperature',   weight: 10 },
+  { key: 'precipitation', label: 'Precipitation', weight: 33 },
+  { key: 'grade',         label: 'Grade',         weight: 22 },
+  { key: 'visibility',    label: 'Visibility',    weight: 20 },
+  { key: 'temperature',   label: 'Temperature',   weight: 12 },
+  { key: 'wind',          label: 'Wind',          weight:  8 },
+  { key: 'roadClass',     label: 'Road class',    weight:  5 },
 ]
 
 // ── Risk / condition colour helpers ───────────────────────────
@@ -245,67 +247,11 @@ function interpolateScore(value, breakpoints) {
   return 0
 }
 
-function calculateRiskScore(weatherPoints, elevation) {
-  if (!weatherPoints?.length) return null
-
-  const maxPrecipMm  = Math.max(...weatherPoints.map(p => p.precipMm))
-  const minVisMi     = Math.min(...weatherPoints.map(p => p.visibilityMi))
-  const maxWindMph   = Math.max(...weatherPoints.map(p => p.windMph))
-  const minTempF     = Math.min(...weatherPoints.map(p => p.tempF))
-  // Convert gain from feet back to meters
-  const gainFt       = parseFloat((elevation?.gainFt ?? '0').replace(/[^0-9.]/g, '')) || 0
-  const gainM        = gainFt / 3.281
-
-  const precip = interpolateScore(maxPrecipMm, [
-    [0, 0], [0.5, 20], [1, 35], [2, 55], [3, 70], [5, 85], [8, 100],
-  ])
-  const elev = interpolateScore(gainM, [
-    [0, 0], [300, 15], [700, 35], [1200, 55], [1800, 72], [2500, 85], [3500, 100],
-  ])
-  const vis = interpolateScore(minVisMi, [
-    [0.25, 100], [1, 80], [2, 60], [5, 35], [10, 15], [20, 5], [47, 0],
-  ])
-  const wind = interpolateScore(maxWindMph, [
-    [0, 0], [10, 8], [20, 20], [30, 38], [45, 60], [60, 80], [75, 100],
-  ])
-  const temp = interpolateScore(minTempF, [
-    [0, 100], [10, 90], [20, 78], [28, 60], [32, 40], [35, 15], [40, 0],
-  ])
-
-  const total = Math.min(100, Math.max(0, Math.round(
-    precip * 0.35 + elev * 0.25 + vis * 0.20 + wind * 0.10 + temp * 0.10
-  )))
-
-  return {
-    total,
-    scores: {
-      Precipitation: Math.round(precip),
-      Elevation:     Math.round(elev),
-      Visibility:    Math.round(vis),
-      Wind:          Math.round(wind),
-      Temperature:   Math.round(temp),
-    },
-  }
-}
-
 function riskLabel(total) {
   if (total <= 30) return 'Low risk'
   if (total <= 60) return 'Moderate risk'
   if (total <= 80) return 'Elevated risk'
   return 'High risk'
-}
-
-function getRiskExplanation(scores) {
-  if (!scores) return null
-  const top = Object.entries(scores).sort((a, b) => b[1] - a[1])[0]
-  if (!top || top[1] <= 40) return 'Conditions look good. Standard safe driving applies.'
-  return {
-    Precipitation: 'Rain is the main concern on this route — wet roads increase stopping distance.',
-    Elevation:     'Significant elevation change — watch speed on descents, especially in wet conditions.',
-    Visibility:    'Reduced visibility detected — use headlights and increase following distance.',
-    Wind:          'Strong winds along the route — be cautious when overtaking large vehicles.',
-    Temperature:   'Near-freezing temperatures — watch for black ice especially on bridges.',
-  }[top[0]] ?? 'Conditions look good. Standard safe driving applies.'
 }
 
 // ── Navigation handoff — open route in external app ──────────
@@ -919,6 +865,20 @@ export default function App() {
         meta.map(m => fetchElevationData(m.elevSamples))
       )
 
+      // Phase 3 — new segment-level risk engine (runs per route sequentially to avoid rate limits)
+      setLoadingPhase('scoring')
+      const allRiskData = await Promise.all(
+        routes.map((r, i) => computeRouteRisk({
+          routeCoordinates:   r.geometry.coordinates,
+          routeDistanceMiles: r.distance / 1609.344,
+          routeDurationSecs:  r.duration,
+          departureTime:      deptDate,
+          elevationPoints:    allElevMeters[i],
+          mapboxSteps:        r.legs?.[0]?.steps ?? [],
+          mapboxToken:        TOKEN,
+        }))
+      )
+
       // Reverse-geocode all waypoints across all routes in parallel
       const allCityNames = await Promise.all(
         allWeatherPoints.map(pts =>
@@ -928,7 +888,7 @@ export default function App() {
 
       // Assemble per-route condition objects
       const results = meta.map((m, i) => {
-        const elevation    = processElevation(allElevMeters[i], m.totalDistanceMiles)
+        const elevation     = processElevation(allElevMeters[i], m.totalDistanceMiles)
         const weatherPoints = allWeatherPoints[i]
         return {
           elevation,
@@ -938,7 +898,7 @@ export default function App() {
         }
       })
 
-      const rsList   = results.map(r => calculateRiskScore(r.weatherPoints, r.elevation))
+      const rsList    = allRiskData  // new engine results replace calculateRiskScore
       const alertList = results.map((r, i) => generateAlerts(r.weatherPoints, allCityNames[i], r.elevation))
 
       setAllConditions(results)
@@ -994,7 +954,7 @@ export default function App() {
       const url =
         `https://api.mapbox.com/directions/v5/mapbox/driving/` +
         `${org[0]},${org[1]};${dst[0]},${dst[1]}` +
-        `?alternatives=true&geometries=geojson&overview=full&steps=false` +
+        `?alternatives=true&geometries=geojson&overview=full&steps=true` +
         `${excludeParam}&access_token=${TOKEN}`
 
       const res = await fetch(url)
@@ -1296,7 +1256,7 @@ export default function App() {
   const conditions      = allConditions[activeRouteIdx] ?? null
   const riskScore       = allRiskScores[activeRouteIdx] ?? null
   const alerts          = allAlerts[activeRouteIdx]     ?? []
-  const routeRiskScores = { 0: allRiskScores[0]?.total, 1: allRiskScores[1]?.total }
+  const routeRiskScores = { 0: allRiskScores[0]?.routeScore, 1: allRiskScores[1]?.routeScore }
 
   const elev = conditions?.elevation
   const dim  = conditionsLoading ? 0.45 : 1
@@ -1496,8 +1456,8 @@ export default function App() {
                       <p style={{ fontSize: 10, color: C.textMuted, marginTop: showElev ? 1 : 2 }}>Swipe up for details</p>
                     </div>
                     {riskScore && (
-                      <span style={{ fontFamily: mono, fontSize: 22, fontWeight: 600, color: scoreColor(riskScore.total) }}>
-                        {riskScore.total}
+                      <span style={{ fontFamily: mono, fontSize: 22, fontWeight: 600, color: scoreColor(riskScore.routeScore) }}>
+                        {riskScore.routeScore}
                       </span>
                     )}
                   </div>
@@ -1699,8 +1659,8 @@ export default function App() {
 
             {/* Route comparison (compact) */}
             {(() => {
-              const sA = allRiskScores[0]?.total
-              const sB = allRiskScores[1]?.total
+              const sA = allRiskScores[0]?.routeScore
+              const sB = allRiskScores[1]?.routeScore
               const bestIdx = (sA === undefined && sB === undefined) ? -1
                 : sA === undefined ? 1
                 : sB === undefined ? 0
@@ -1712,7 +1672,7 @@ export default function App() {
                     if (routes.length > 0 && i >= routes.length) return null
                     const isActive = i === activeRouteIdx
                     const route    = routes[i] ?? null
-                    const score    = allRiskScores[i]?.total
+                    const score    = allRiskScores[i]?.routeScore
                     const isBest   = bestIdx === i && routes.length > 0
                     const barColor = score !== undefined ? scoreColor(score) : C.riskLow
                     return (
@@ -1752,7 +1712,7 @@ export default function App() {
 
             {/* Compact risk score */}
             {(() => {
-              const total = riskScore?.total
+              const total = riskScore?.routeScore
               const color = total !== undefined ? scoreColor(total) : C.textMuted
               const label = total !== undefined ? riskLabel(total) : '--'
               return (
@@ -1780,16 +1740,21 @@ export default function App() {
                 {riskScore && (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                     <SectionLabel>Risk Breakdown</SectionLabel>
-                    {RISK_FACTORS.map(({ label: fl }) => {
-                      const score    = riskScore?.scores?.[fl] ?? 0
+                    {RISK_FACTORS.map((factor) => {
+                      const score    = riskScore?.factors?.[factor.key] ?? 0
                       const barColor = scoreColor(score)
                       return (
-                        <div key={fl} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                          <span style={{ fontSize: 11, color: C.textMuted, width: 88, flexShrink: 0 }}>{fl}</span>
-                          <div style={{ flex: 1, height: 3, background: C.elevated, borderRadius: 2 }}>
+                        <div key={factor.key} style={{ marginBottom: 2 }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 2 }}>
+                            <span style={{ fontSize: 10, color: C.textMuted }}>
+                              {factor.label}
+                              <span style={{ color: C.textMuted, opacity: 0.6, marginLeft: 3 }}>({factor.weight}%)</span>
+                            </span>
+                            <span style={{ fontFamily: mono, fontSize: 10, color: barColor }}>{score}</span>
+                          </div>
+                          <div style={{ height: 3, background: C.elevated, borderRadius: 2 }}>
                             <div style={{ height: '100%', width: `${score}%`, background: barColor, borderRadius: 2, transition: 'width 0.4s' }} />
                           </div>
-                          <span style={{ fontFamily: mono, fontSize: 10, color: barColor, width: 22, textAlign: 'right', flexShrink: 0 }}>{score}</span>
                         </div>
                       )
                     })}
@@ -2247,10 +2212,10 @@ export default function App() {
         <section style={{ padding: '20px 16px 16px', display: 'flex', flexDirection: 'column', gap: 12, flexShrink: 0 }}>
           <SectionLabel>Risk Score</SectionLabel>
           {(() => {
-            const total  = riskScore?.total
+            const total  = riskScore?.routeScore
             const color  = total !== undefined ? scoreColor(total) : C.textMuted
             const label  = total !== undefined ? riskLabel(total)  : 'Select a route'
-            const expl   = getRiskExplanation(riskScore?.scores)
+            const expl   = riskScore?.explanation ?? null
             return (
               <>
                 <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
@@ -2268,16 +2233,28 @@ export default function App() {
                   <p style={{ fontSize: 12, color: C.textSec, lineHeight: 1.6, textAlign: 'center', padding: '10px 14px' }}>{expl}</p>
                 )}
                 <div style={{ display: 'flex', flexDirection: 'column' }}>
-                  {RISK_FACTORS.map(({ label: factorLabel }) => {
-                    const score    = riskScore?.scores?.[factorLabel] ?? 0
+                  {RISK_FACTORS.map((factor) => {
+                    const score    = riskScore?.factors?.[factor.key] ?? 0
                     const barColor = scoreColor(score)
                     return (
-                      <div key={factorLabel} style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
-                        <span style={{ fontSize: 12, color: C.textMuted, width: 100, flexShrink: 0 }}>{factorLabel}</span>
-                        <div style={{ flex: 1, height: 6, background: C.elevated, borderRadius: 3 }}>
-                          <div style={{ height: '100%', width: `${score}%`, background: barColor, borderRadius: 3, transition: 'width 0.4s' }} />
+                      <div key={factor.key} style={{ marginBottom: 8 }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 3 }}>
+                          <span style={{ fontSize: 11, color: C.textSec }}>
+                            {factor.label}
+                            <span style={{ color: C.textMuted, marginLeft: 4 }}>({factor.weight}%)</span>
+                          </span>
+                          <span style={{ fontFamily: mono, fontSize: 11, color: scoreColor(score) }}>
+                            {score}
+                          </span>
                         </div>
-                        <span style={{ fontFamily: mono, fontSize: 12, color: barColor, width: 24, textAlign: 'right', flexShrink: 0 }}>{score}</span>
+                        <div style={{ height: 5, borderRadius: 3, background: 'rgba(255,255,255,0.07)' }}>
+                          <div style={{
+                            height: '100%', borderRadius: 3,
+                            width: `${score}%`,
+                            background: scoreColor(score),
+                            transition: 'width 0.4s ease',
+                          }} />
+                        </div>
                       </div>
                     )
                   })}
@@ -2433,7 +2410,10 @@ export default function App() {
           ) : (
             <p style={{ fontSize: 12, color: C.textMuted }}>
               {conditionsLoading
-                ? 'Fetching weather data…'
+                ? loadingPhase === 'weather'   ? 'Fetching weather…'
+                : loadingPhase === 'elevation' ? 'Loading elevation…'
+                : loadingPhase === 'scoring'   ? 'Scoring route…'
+                : 'Analyzing conditions…'
                 : 'Find a route to see weather conditions.'}
             </p>
           )}

@@ -1,3 +1,12 @@
+import {
+  getSegmentIntervalMiles,
+  sampleRouteByDistance,
+  scoreSegment,
+  rollupRouteScore,
+  aggregateFactors,
+  generateExplanation,
+} from './riskEngine.js';
+
 // ── Weather code lookup ──────────────────────────────────────
 const WEATHER_CODES = {
   0:  { label: 'Clear',        emoji: '☀️' },
@@ -263,6 +272,7 @@ export async function fetchRouteConditions(route, departureTime = new Date()) {
   const coords             = route.geometry.coordinates
   const totalDistanceMiles = route.distance / 1609.344
 
+
   const elevSamples = sampleCoords(coords, 80)
   const timePoints  = sampleByTime(coords, route.duration)
 
@@ -295,4 +305,224 @@ export async function fetchRouteConditions(route, departureTime = new Date()) {
       gain:       elevation?.gainFt ?? '--',
     },
   }
+}
+
+// ─── MAIN RISK COMPUTATION ENTRY POINT ───────────────────────────────────────
+// Called once per route after Mapbox directions + Open-Meteo elevation are fetched.
+// 
+// Parameters:
+//   routeCoordinates  — GeoJSON coordinates array from Mapbox route.geometry.coordinates
+//   routeDistanceMiles — total route distance in miles
+//   routeDurationSecs  — total route duration in seconds (from Mapbox)
+//   departureTime      — Date object for when the driver leaves
+//   elevationPoints    — array of elevation values (meters) from Open-Meteo,
+//                        one per evenly-spaced sample point (up to 80 points)
+//   mapboxSteps        — array of Mapbox step objects from route.legs[0].steps
+//                        (requires steps=true in Directions API call)
+//   mapboxToken        — VITE_MAPBOX_TOKEN for reverse geocoding segment labels
+//
+// Returns:
+//   { routeScore, segments, worstSegment, factors, explanation }
+//   segments also carries { score, lengthMeters, coord } for map coloring
+
+export async function computeRouteRisk({
+  routeCoordinates,
+  routeDistanceMiles,
+  routeDurationSecs,
+  departureTime,
+  elevationPoints,
+  mapboxSteps,
+  mapboxToken,
+}) {
+  if (!routeCoordinates || routeCoordinates.length < 2) return null;
+
+  // 1. Determine adaptive segment interval
+  const intervalMiles = getSegmentIntervalMiles(routeDistanceMiles);
+  const intervalMeters = intervalMiles * 1609.34;
+
+  // 2. Sample the route geometry at adaptive intervals
+  const samplePoints = sampleRouteByDistance(routeCoordinates, intervalMeters);
+
+  // 3. For each sample point compute arrival time
+  //    Speed approximation: total distance / total duration (constant avg speed)
+  const avgSpeedMps = (routeDistanceMiles * 1609.34) / routeDurationSecs;
+  const departure = departureTime instanceof Date ? departureTime : new Date(departureTime);
+
+  // 4. Map Mapbox steps to road class by distance range
+  //    Build a lookup: for a given distanceFromStart, what road_class applies?
+  const stepRoadClasses = buildStepRoadClassMap(mapboxSteps);
+
+  // 5. Map elevation samples to distance fractions
+  //    elevationPoints is an array of numbers (meters), evenly spaced along route
+  const totalRouteMeters = routeDistanceMiles * 1609.34;
+
+  // 6. Fetch weather for all segment midpoints in parallel (batched to avoid rate limits)
+  const weatherResults = await fetchWeatherForSegments(samplePoints, avgSpeedMps, departure);
+
+  // 7. Score each segment
+  const segments = [];
+  for (let i = 0; i < samplePoints.length - 1; i++) {
+    const segStart = samplePoints[i];
+    const segEnd   = samplePoints[i + 1];
+    const segLengthMeters = segEnd.distanceFromStartMeters - segStart.distanceFromStartMeters;
+
+    // Elevation: interpolate from the 80-point elevation array
+    const elevStart = interpolateElevation(elevationPoints, segStart.distanceFromStartMeters, totalRouteMeters);
+    const elevEnd   = interpolateElevation(elevationPoints, segEnd.distanceFromStartMeters,   totalRouteMeters);
+    const elevDiff  = elevEnd - elevStart;
+
+    // Road class: find the step covering the midpoint distance
+    const midpointDist = (segStart.distanceFromStartMeters + segEnd.distanceFromStartMeters) / 2;
+    const roadClass = getRoadClassAtDistance(stepRoadClasses, midpointDist);
+
+    // Arrival time at segment midpoint
+    const midDist = (segStart.distanceFromStartMeters + segEnd.distanceFromStartMeters) / 2;
+    const arrivalTime = new Date(departure.getTime() + (midDist / avgSpeedMps) * 1000);
+    const arrivalHour = arrivalTime.getHours();
+
+    const weather = weatherResults[i] ?? {};
+
+    const { score, factors } = scoreSegment({
+      weather,
+      elevDiffMeters: elevDiff,
+      segmentLengthMeters: segLengthMeters,
+      roadClass,
+      arrivalHour,
+    });
+
+    segments.push({
+      score,
+      factors,
+      lengthMeters: segLengthMeters,
+      coord: segStart.coord,   // [lng, lat] — used for map segment coloring
+      label: null,             // filled in below for worst segment only
+    });
+  }
+
+  // 8. Rollup
+  const routeScore   = rollupRouteScore(segments);
+  const worstSeg     = segments.reduce((a, b) => (a.score > b.score ? a : b), segments[0]);
+  const worstIndex   = segments.indexOf(worstSeg);
+
+  // Reverse geocode only the worst segment to get a city label (1 API call)
+  if (mapboxToken && worstSeg) {
+    const [lng, lat] = worstSeg.coord;
+    try {
+      const res = await fetch(
+        `https://api.mapbox.com/geocoding/v5/mapbox.places/${lng},${lat}.json?types=place&access_token=${mapboxToken}`
+      );
+      const data = await res.json();
+      segments[worstIndex].label = data.features?.[0]?.text ?? null;
+    } catch (_) {
+      // label stays null — explanation will omit location
+    }
+  }
+
+  const aggregated  = aggregateFactors(segments);
+  const explanation = generateExplanation(routeScore, segments[worstIndex], aggregated);
+
+  return {
+    routeScore,
+    segments,        // array with .score, .coord, .lengthMeters — use for map coloring
+    worstSegment: segments[worstIndex],
+    factors: aggregated,
+    explanation,
+  };
+}
+
+// ─── HELPERS (private to this module) ────────────────────────────────────────
+
+// Fetch Open-Meteo weather for each segment midpoint.
+// Batches into groups of 10 with a 300ms delay between batches
+// to avoid Open-Meteo rate limiting (the existing known issue).
+async function fetchWeatherForSegments(samplePoints, avgSpeedMps, departure) {
+  const results = [];
+  const batchSize = 10;
+  const delayMs = 300;
+
+  for (let b = 0; b < samplePoints.length - 1; b += batchSize) {
+    const batch = samplePoints.slice(b, Math.min(b + batchSize, samplePoints.length - 1));
+
+    const batchResults = await Promise.all(
+      batch.map(async (point, localIdx) => {
+        const globalIdx = b + localIdx;
+        const midDist = (point.distanceFromStartMeters + (samplePoints[globalIdx + 1]?.distanceFromStartMeters ?? point.distanceFromStartMeters + 8047)) / 2;
+        const arrivalTime = new Date(departure.getTime() + (midDist / avgSpeedMps) * 1000);
+        const arrivalHour = arrivalTime.getHours();
+
+        const [lng, lat] = point.coord;
+        const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lng}&hourly=temperature_2m,precipitation,wind_speed_10m,visibility,weather_code&wind_speed_unit=kmh&timezone=auto&forecast_days=2`;
+
+        try {
+          const res  = await fetch(url);
+          const data = await res.json();
+
+          // Find the index in the hourly array matching the arrival hour
+          const timeStr = arrivalTime.toISOString().slice(0, 13); // "2026-04-26T14"
+          const hourIndex = data.hourly.time.findIndex((t) => t.startsWith(timeStr));
+          const idx = hourIndex >= 0 ? hourIndex : 0;
+
+          return {
+            temperature_2m:   data.hourly.temperature_2m?.[idx]   ?? 15,
+            precipitation:    data.hourly.precipitation?.[idx]     ?? 0,
+            wind_speed_10m:   data.hourly.wind_speed_10m?.[idx]    ?? 0,
+            visibility:       data.hourly.visibility?.[idx]        ?? 24000,
+            weather_code:     data.hourly.weather_code?.[idx]      ?? 0,
+          };
+        } catch (_) {
+          return {}; // scoreSegment handles missing weather gracefully with defaults
+        }
+      })
+    );
+
+    results.push(...batchResults);
+
+    // Delay between batches (skip delay after last batch)
+    if (b + batchSize < samplePoints.length - 1) {
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+  }
+
+  return results;
+}
+
+// Interpolate elevation at a given distance along the route.
+// elevationPoints: array of numbers (meters), evenly spaced across totalRouteMeters.
+function interpolateElevation(elevationPoints, distanceMeters, totalRouteMeters) {
+  if (!elevationPoints || elevationPoints.length === 0) return 0;
+  const fraction = Math.min(1, distanceMeters / totalRouteMeters);
+  const floatIdx = fraction * (elevationPoints.length - 1);
+  const lo = Math.floor(floatIdx);
+  const hi = Math.ceil(floatIdx);
+  if (lo === hi) return elevationPoints[lo];
+  const t = floatIdx - lo;
+  return elevationPoints[lo] * (1 - t) + elevationPoints[hi] * t;
+}
+
+// Build a list of { startDistMeters, endDistMeters, roadClass } from Mapbox steps.
+// Mapbox step objects have a `distance` field (meters for that step).
+function buildStepRoadClassMap(steps) {
+  if (!steps || steps.length === 0) return [];
+  const map = [];
+  let cursor = 0;
+  for (const step of steps) {
+    const roadClass = step.intersections?.[0]?.mapbox_streets_v8?.class ?? 'primary';
+    // Note: Mapbox step objects expose road_class when steps=true is requested
+    map.push({
+      startDistMeters: cursor,
+      endDistMeters: cursor + (step.distance ?? 0),
+      roadClass,
+    });
+    cursor += step.distance ?? 0;
+  }
+  return map;
+}
+
+function getRoadClassAtDistance(stepMap, distanceMeters) {
+  for (const entry of stepMap) {
+    if (distanceMeters >= entry.startDistMeters && distanceMeters <= entry.endDistMeters) {
+      return entry.roadClass;
+    }
+  }
+  return 'primary'; // safe default
 }
