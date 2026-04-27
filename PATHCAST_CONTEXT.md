@@ -93,7 +93,8 @@ pathcast/
 │   │   └── useGeocoding.js        # Mapbox autocomplete logic
 │   ├── utils/
 │   │   ├── format.js              # formatDuration, formatDistance, unit conversions
-│   │   └── weatherElevation.js    # Open-Meteo API calls, weather processing, notable waypoints
+│   │   ├── weatherElevation.js    # Open-Meteo API calls, weather processing, computeRouteRisk orchestrator
+│   │   └── riskEngine.js          # Segment scoring engine — factors, multipliers, rollup, explanation
 │   ├── styles/
 │   ├── App.jsx                    # Root component, layout
 │   ├── main.jsx
@@ -212,11 +213,11 @@ pathcast/
 - **Route options** — Avoid Tolls / Avoid Highways / Avoid Ferries chip toggles; passed as `exclude` parameter to Mapbox API; available on both desktop and mobile
 - **Departure time toggle** — collapsible section; Leave now vs scheduled departure with datetime picker; weather offset by actual arrival time per waypoint
 - **Auto-collapse after search** — Departure Time and Route Options sections auto-collapse after Find Route to give risk score more space
-- **Loading states** — Find Route button shows phase labels: "Finding routes…" → "Fetching weather…" → "Loading elevation…"
+- **Loading states** — Find Route button shows phase labels: "Finding routes…" → "Fetching weather…" → "Loading elevation…" → "Scoring route…"
 
 #### Conditions & Analysis
 - **Route comparison cards** — duration, distance, risk score; active card: #1e2433 background with 3px teal left border; inactive: #1a1e28; Best badge on lower-risk route; trade-off insight pill with ℹ icon
-- **Risk score** — 0–100 in DM Mono 56px, color-coded green/amber/red, label, 8px progress bar, plain English explanation of dominant risk factor, 5-factor breakdown with 6px bars
+- **Risk score** — 0–100 in DM Mono 56px, color-coded green/amber/red, label, 8px progress bar, plain English explanation, 6-factor breakdown with bars (Precipitation 33%, Grade 22%, Visibility 20%, Temperature 12%, Wind 8%, Road class 5%)
 - **Route alerts** — up to 4 alert types: rain, wind, freezing, low visibility; each with colored left border, emoji, bold title, city name from reverse geocoding, driving advice; all-clear card when no hazards
 - **Weather timeline** — vertical timeline with teal spine, one card per 45-min interval, arrival time calculated from departure, condition + emoji + temp/wind/precip/visibility row, Arrived row at bottom
 - **Nighttime emoji logic** — waypoints arriving before 6am or after 8pm show 🌙 (clear) or 🌥️ (cloudy) instead of daytime equivalents
@@ -243,7 +244,6 @@ pathcast/
 
 ### 🚧 In progress
 - **Mobile layout refinement** — bottom sheet collapse UX, being handled in dedicated mobile chat
-- **Risk score algorithm** — compound hazard multipliers, being refined in dedicated algorithm chat
 - **Elevation chart on Safari** — requires click before hover works; Chrome works correctly
 
 ### 📋 Planned (not yet built)
@@ -258,37 +258,260 @@ pathcast/
 
 ## Risk Score Algorithm
 
-**Overall score:** Weighted sum of 5 factors, each 0–100. Final score rounded to nearest integer, capped at 100.
+The risk engine lives in `src/utils/riskEngine.js` and is orchestrated by `computeRouteRisk()` in `weatherElevation.js`. It runs as a 4-layer pipeline after every route fetch.
 
-```javascript
-Score = (Precipitation × 0.35) + (Elevation × 0.25) +
-        (Visibility × 0.20) + (Wind × 0.10) + (Temperature × 0.10)
+---
+
+### Pipeline Overview
+
+```
+RAW ROUTE DATA (Mapbox + Open-Meteo)
+         │
+         ▼
+LAYER 1 — ADAPTIVE SEGMENTATION
+  Slice route into geographic segments based on total distance:
+  ≤150 mi → 5-mile segments
+  150–400 mi → 8-mile segments
+  >400 mi → 10-mile segments
+  Each segment: midpoint coord, arrival time, elevation diff, road class
+         │
+         ▼
+LAYER 2 — PER-SEGMENT FACTOR SCORING
+  For each segment, score 6 factors independently (each 0–100):
+  Precipitation (33%) · Grade (22%) · Visibility (20%)
+  Temperature (12%) · Wind (8%) · Road class (5%)
+  → Weighted sum = base segment score
+         │
+         ▼
+LAYER 3 — COMPOUND HAZARD MULTIPLIERS
+  If multiple dangerous conditions coincide in same segment,
+  apply a multiplier to that segment's score (highest wins, no stacking).
+  Score capped at 100 after multiplier.
+         │
+         ▼
+LAYER 4 — ROUTE-LEVEL ROLLUP
+  Route score = (P90 of length-weighted segment scores × 0.75)
+              + peak danger bonus (if any segment > 70)
+  Capped at 100.
+         │
+         ▼
+OUTPUTS
+  routeScore (0–100) · segment array (for map coloring)
+  aggregated factors (worst per factor) · plain-English explanation
 ```
 
-**Factor inputs — worst-case across all waypoints:**
-- Precipitation: `max` precip in mm
-- Elevation: total gain in meters (converted from feet string)
-- Visibility: `min` visibility in miles (inverted — lower = higher score)
-- Wind: `max` wind in mph
-- Temperature: `min` temp in °F (inverted — colder = higher score)
+---
 
-**Breakpoints (linear interpolation between values):**
+### Layer 1 — Adaptive Segmentation
 
-| Factor | Breakpoints |
+Route geometry (GeoJSON coordinates from Mapbox) is walked using the Haversine formula to place sample points at exact distance intervals. Each sample point records:
+- `coord` — [lng, lat] at that point
+- `distanceFromStartMeters` — cumulative distance along route
+- `arrivalTime` — departure time + (distance / average speed)
+
+Segment interval adapts to route length to balance accuracy against Open-Meteo API call volume:
+
+| Route length | Segment interval | Typical segment count |
+|---|---|---|
+| ≤ 150 miles | 5 miles | up to ~30 |
+| 150–400 miles | 8 miles | ~20–50 |
+| > 400 miles | 10 miles | ~40–60 |
+
+Weather is fetched once per segment midpoint (separate from the 45-min timeline waypoints). Elevation is interpolated from the existing 80-point elevation array — no extra API call needed.
+
+---
+
+### Layer 2 — Factor Scoring
+
+Each factor uses **linear interpolation** between calibrated breakpoints. The `interpolate(value, breakpoints)` function walks the breakpoint table and draws a straight line between the two surrounding values.
+
+All breakpoints are grounded in NHTSA/FHWA adverse-condition crash rate data.
+
+#### Precipitation
+Input: `precipitation` in mm from Open-Meteo (raw hourly value at arrival time)
+
+| mm | Score |
 |---|---|
-| Precipitation (mm) | 0→0, 0.5→20, 1→35, 2→55, 3→70, 5→85, 8→100 |
-| Elevation gain (m) | 0→0, 300→15, 700→35, 1200→55, 1800→72, 2500→85, 3500→100 |
-| Visibility (mi) | 0.25→100, 1→80, 2→60, 5→35, 10→15, 20→5, 47→0 |
-| Wind (mph) | 0→0, 10→8, 20→20, 30→38, 45→60, 60→80, 75→100 |
-| Temperature (°F) | 0→100, 10→90, 20→78, 28→60, 32→40, 35→15, 40→0 |
+| 0 | 0 |
+| 0.5 | 20 |
+| 1 | 35 |
+| 2 | 55 |
+| 3 | 70 |
+| 5 | 85 |
+| ≥ 8 | 100 |
 
-**Risk labels:**
-- 0–30 = Low risk (green #00d4aa)
-- 31–60 = Moderate risk (amber #f5a623)
-- 61–80 = Elevated risk (red #ff4757)
-- 81–100 = High risk (red #ff4757)
+#### Grade (road slope)
+Input: `|elevation diff| / segment length × 100` = percent slope
 
-**Known limitation:** Formula is purely additive — no compound hazard multipliers yet. Being improved in dedicated algorithm chat.
+| % grade | Score |
+|---|---|
+| 0% | 0 |
+| 1% | 5 |
+| 2% | 15 |
+| 4% | 35 |
+| 6% | 55 |
+| 8% | 72 |
+| 10% | 85 |
+| ≥ 13% | 100 |
+
+Note: elevation diff is computed per segment from the 80-point Open-Meteo elevation array using linear interpolation. This measures actual slope, not total trip gain.
+
+#### Visibility
+Input: `visibility` in meters from Open-Meteo → converted to km internally
+
+| km | Score |
+|---|---|
+| ≥ 75 | 0 |
+| 32 | 5 |
+| 16 | 15 |
+| 8 | 35 |
+| 3.2 | 60 |
+| 1.6 | 80 |
+| ≤ 0.4 | 100 |
+
+#### Temperature
+Input: `temperature_2m` in °C from Open-Meteo. Risk is near and below freezing only — above 4°C scores 0.
+
+| °C | Score |
+|---|---|
+| ≥ 4 | 0 |
+| 2 | 8 |
+| 0 (freezing) | 40 |
+| -2 | 60 |
+| -6 | 78 |
+| -12 | 90 |
+| ≤ -20 | 100 |
+
+#### Wind
+Input: `wind_speed_10m` in km/h from Open-Meteo (requested with `wind_speed_unit=kmh`)
+
+| km/h | Score |
+|---|---|
+| 0 | 0 |
+| 16 | 8 |
+| 32 | 20 |
+| 48 | 38 |
+| 72 | 60 |
+| 96 | 80 |
+| ≥ 120 | 100 |
+
+#### Road Class
+Input: `step.intersections[0].mapbox_streets_v8.class` from Mapbox Directions step objects (requires `steps=true` in API call). Fixed lookup table — not interpolated.
+
+| Mapbox class | Score |
+|---|---|
+| motorway | 5 |
+| trunk | 8 |
+| primary | 12 |
+| secondary | 18 |
+| tertiary | 25 |
+| residential | 35 |
+| service | 40 |
+| ferry | 50 |
+| track | 60 |
+| unknown | 15 (default) |
+
+#### Weighted sum
+```
+baseScore = (precipitation × 0.33) + (grade × 0.22) + (visibility × 0.20)
+          + (temperature × 0.12) + (wind × 0.08) + (roadClass × 0.05)
+```
+Weights sum to 1.00.
+
+---
+
+### Layer 3 — Compound Hazard Multipliers
+
+Applied after the base score. Only the **highest applicable multiplier fires** — they do not stack multiplicatively (which would over-penalize). Score is capped at 100 after multiplier is applied.
+
+Grounded in NHTSA/FHWA compound-condition crash rate data.
+
+| Condition | Trigger | Multiplier |
+|---|---|---|
+| Rain + steep descent | precip ≥ 1mm AND grade ≥ 4% | ×1.45 |
+| Ice + steep grade | temp ≤ 0°C AND grade ≥ 3% | ×1.40 |
+| Night + rain + low visibility | not daytime AND precip ≥ 0.5mm AND vis ≤ 3.2km | ×1.35 |
+| Low visibility on high-speed road | vis ≤ 1.6km AND road class is motorway/trunk/primary | ×1.30 |
+
+Daytime = arrival hour between 6 and 20. Night = before 6 or after 20.
+
+---
+
+### Layer 4 — Route-Level Rollup
+
+Segment scores are aggregated into a single route score using a **P90 + peak danger bonus** formula. This avoids two failure modes:
+- **Simple average** — a long safe highway dilutes a dangerous mountain pass
+- **Max score** — one mild rain waypoint at the start makes the whole route look terrible
+
+```
+routeScore = (P90_score × 0.75) + peakBonus
+peakBonus  = max(0, peakSegmentScore − 70) × 0.5   [only if any segment > 70]
+routeScore = min(100, round(routeScore))
+```
+
+**P90** is the length-weighted 90th percentile — segments are sorted by score, then cumulative length is walked until 90% of total route distance is covered. That segment's score is the P90. This means 90% of the route is at or below that risk level.
+
+**Peak bonus** ensures a genuinely dangerous segment (score > 70) still registers in the route score. A segment scoring 90 adds `(90 − 70) × 0.5 = 10` bonus points on top of the P90.
+
+---
+
+### Factor Panel Aggregation
+
+The 6-factor breakdown shown in the UI uses `aggregateFactors()`, which takes the **maximum (worst) value per factor across all segments**:
+
+```javascript
+result[key] = Math.max(...segments.map(s => s.factors[key]))
+```
+
+This answers "what was the worst moment on this drive for each dimension?" — which is what a dispatcher needs to know. A dispatcher doesn't care about average wind; they care about peak wind on the route.
+
+---
+
+### Plain-English Explanation
+
+Generated by `generateExplanation()` based on route score + aggregated factors:
+
+| Route score | Explanation pattern |
+|---|---|
+| 0–15 | "Conditions look clear. Safe to drive." |
+| 16–30 | "Minor weather along the route. Drive normally and stay alert." |
+| 31–60 | "Moderate risk near [location]. Watch for [factors]. Reduce speed in affected areas." |
+| 61–80 | "Elevated risk near [location] — [factors]. Consider delaying or taking extra precautions." |
+| 81–100 | "High risk near [location]. Dangerous conditions: [factors]. Strongly consider delaying this trip." |
+
+Location is the reverse-geocoded city name of the worst-scoring segment (1 Mapbox geocoding API call per route, only for the worst segment).
+
+Factors included in the explanation if their aggregated score ≥ 40: precipitation, grade, visibility, temperature, wind.
+
+---
+
+### Risk Labels and Colors
+
+| Score range | Label | Color |
+|---|---|---|
+| 0–30 | Low risk | `#00d4aa` (teal) |
+| 31–60 | Moderate risk | `#f5a623` (amber) |
+| 61–80 | Elevated risk | `#ff4757` (red) |
+| 81–100 | High risk | `#ff4757` (red) |
+
+---
+
+### Data Sources Summary
+
+| Data | Source | API call timing |
+|---|---|---|
+| Weather per segment | Open-Meteo hourly forecast | Fetched at segment midpoint coords, matched to arrival hour. Batched in groups of 10 with 300ms delay to avoid rate limiting. |
+| Elevation per segment | Open-Meteo elevation (80-point array) | Fetched once per route. Segment elevation diff interpolated from the array. |
+| Road class per segment | Mapbox Directions steps (`steps=true`) | Extracted from `step.intersections[0].mapbox_streets_v8.class`. No extra API call. |
+| Worst segment city name | Mapbox Reverse Geocoding | 1 call per route, only for the worst-scoring segment. |
+
+---
+
+### Rev2 Additions (Planned)
+
+- **NHTSA crash index** — historical crash rate lookup by road segment, adds 10% weight as a calibration multiplier
+- **Live traffic congestion** — Mapbox Traffic API (requires paid plan), enables snow + congestion compound multiplier (×1.25)
+- **Vehicle type profiles** — car / truck / motorcycle weight adjustments (e.g. trucks more sensitive to grade and wind)
 
 ---
 
@@ -327,10 +550,11 @@ Night = arrival hour before 6 or after 20.
 ### Mapbox Directions API
 ```
 GET https://api.mapbox.com/directions/v5/mapbox/driving/{lng1},{lat1};{lng2},{lat2}
-  ?alternatives=true&geometries=geojson&overview=full&steps=false
+  ?alternatives=true&geometries=geojson&overview=full&steps=true
   &exclude=toll,motorway,ferry   (only when filters are active)
   &access_token={token}
 ```
+`steps=true` is required — step objects expose `intersections[0].mapbox_streets_v8.class` which the risk engine uses for road class scoring.
 
 ### Mapbox Geocoding API (autocomplete)
 ```
@@ -344,14 +568,16 @@ GET https://api.mapbox.com/geocoding/v5/mapbox.places/{lng},{lat}.json
   ?types=place&access_token={token}
 ```
 
-### Open-Meteo Weather (hourly forecast at arrival time)
+### Open-Meteo Weather (two separate grids)
 ```
 GET https://api.open-meteo.com/v1/forecast
   ?latitude={lat}&longitude={lng}
   &hourly=temperature_2m,precipitation,wind_speed_10m,visibility,weather_code
-  &wind_speed_unit=kmh&timezone=auto&forecast_days=2
+  &wind_speed_unit=kmh&timezone=UTC&forecast_days=2
 ```
-Fetched every 45 minutes of travel time. Arrival time = departure time + (index × 45 min).
+**Two separate fetch grids:**
+- **45-min timeline waypoints** — power the Weather Timeline UI. Fetched via `sampleByTime()`, one per 45 minutes of travel.
+- **Adaptive segment midpoints** — power the risk score engine. Fetched via `sampleRouteByDistance()`, one per 5/8/10-mile segment. Batched in groups of 10 with 300ms delay between batches to avoid rate limiting.
 
 ### Open-Meteo Elevation
 ```
