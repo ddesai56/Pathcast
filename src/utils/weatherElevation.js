@@ -393,9 +393,22 @@ export async function computeRouteRisk({
     segments.push({
       score,
       factors,
-      lengthMeters: segLengthMeters,
-      coord: segStart.coord,   // [lng, lat] — used for map segment coloring
-      label: null,             // filled in below for worst segment only
+      lengthMeters:            segLengthMeters,
+      distanceFromStartMeters: segStart.distanceFromStartMeters,
+      coord:  segStart.coord,  // [lng, lat] — used for map segment coloring
+      label:  null,            // filled in below for worst segment only
+      arrivalHour,
+      // Epoch ms when the driver reaches the start of this segment.
+      // Used by buildTimelineFromSegments to compute timeSeconds for the UI.
+      arrivalTimeMs: departure.getTime() + (segStart.distanceFromStartMeters / avgSpeedMps) * 1000,
+      // Raw weather values — single source of truth for timeline + alerts
+      weather: {
+        precipMm:     weatherResults[i]?.precipitation  ?? 0,
+        tempC:        weatherResults[i]?.temperature_2m ?? 15,
+        windKph:      weatherResults[i]?.wind_speed_10m ?? 0,
+        visibilityKm: (weatherResults[i]?.visibility    ?? 24000) / 1000,
+        weatherCode:  weatherResults[i]?.weather_code   ?? 0,
+      },
     });
   }
 
@@ -428,6 +441,81 @@ export async function computeRouteRisk({
     factors: aggregated,
     explanation,
   };
+}
+
+// ── Build weather timeline from segment data ─────────────────
+// Single source of truth: uses segment weather (distance-based grid) so the
+// timeline is consistent with the risk score and alerts.
+// Subsamples to maxCards evenly-spaced segments for display.
+// Returns an array in the same shape as the old fetchWeatherData() result
+// so the timeline UI needs no changes.
+export function buildTimelineFromSegments(segments, departureTime, maxCards = 10) {
+  if (!segments || segments.length === 0) return []
+
+  const departure = departureTime instanceof Date ? departureTime : new Date(departureTime)
+  const INTERVAL_MS = 45 * 60 * 1000 // 45 minutes
+
+  // Route start and end times in ms
+  const routeStartMs = segments[0].arrivalTimeMs ?? departure.getTime()
+  const routeEndMs   = segments[segments.length - 1].arrivalTimeMs ?? departure.getTime()
+  const routeDurMs   = routeEndMs - routeStartMs
+
+  // Build target timestamps at 45-min intervals from route start
+  // Always include t=0 (departure) and cap total at maxCards
+  const targets = [routeStartMs]
+  let t = routeStartMs + INTERVAL_MS
+  while (t < routeEndMs - INTERVAL_MS * 0.5 && targets.length < maxCards - 1) {
+    targets.push(t)
+    t += INTERVAL_MS
+  }
+  // Always include the final segment
+  targets.push(routeEndMs)
+
+  // For each target time, find the segment whose arrivalTimeMs is closest
+  const displayed = targets.map(targetMs => {
+    return segments.reduce((best, seg) => {
+      const bestDiff = Math.abs((best.arrivalTimeMs ?? 0) - targetMs)
+      const segDiff  = Math.abs((seg.arrivalTimeMs  ?? 0) - targetMs)
+      return segDiff < bestDiff ? seg : best
+    })
+  })
+
+  // Deduplicate (can happen if route is shorter than 45 min)
+  const seen = new Set()
+  const unique = displayed.filter(seg => {
+    if (seen.has(seg)) return false
+    seen.add(seg)
+    return true
+  })
+
+  return unique.map(seg => {
+    const arrivalMs   = seg.arrivalTimeMs ?? departure.getTime()
+    const timeSeconds = Math.max(0, Math.round((arrivalMs - departure.getTime()) / 1000))
+    const arrivalDate = new Date(arrivalMs)
+    const hour        = arrivalDate.getHours()
+    const isNight     = hour < 6 || hour >= 20
+
+    const weatherCode = seg.weather?.weatherCode ?? 0
+    const { label, emoji } = getWeatherInfo(weatherCode, isNight)
+
+    const tempC    = seg.weather?.tempC       ?? 15
+    const windKph  = seg.weather?.windKph     ?? 0
+    const precipMm = seg.weather?.precipMm    ?? 0
+    const visKm    = seg.weather?.visibilityKm ?? 24
+
+    return {
+      coords:       seg.coord,
+      timeSeconds,
+      emoji,
+      label,
+      tempF:        Math.round(tempC * 9 / 5 + 32),
+      windMph:      Math.round(windKph * 0.621371),
+      precipMm,
+      precipIn:     Math.round(precipMm * 0.0393701 * 100) / 100,
+      visibilityMi: Math.round(visKm * 0.621371 * 10) / 10,
+      weatherCode,
+    }
+  })
 }
 
 // ─── HELPERS (private to this module) ────────────────────────────────────────

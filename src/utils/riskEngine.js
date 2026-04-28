@@ -170,6 +170,7 @@ function applyMultipliers(baseScore, { precipMm, gradePct, tempC, visibilityMete
 // arrivalHour: integer 0–23 — used to determine daytime
 
 export function scoreSegment({ weather, elevDiffMeters, segmentLengthMeters, roadClass, arrivalHour }) {
+  console.log('Segment weather:', JSON.stringify(weather))  // ← ADD THIS
   const precipMm       = weather?.precipitation     ?? 0;
   const windKph        = weather?.wind_speed_10m    ?? 0;
   const visibilityM    = weather?.visibility        ?? 24000; // default: clear
@@ -242,9 +243,9 @@ export function rollupRouteScore(segments) {
   }
 
   const peakScore = Math.max(...segments.map((s) => s.score));
-  const peakBonus = peakScore > 70 ? (peakScore - 70) * 0.5 : 0;
+  const peakBonus = peakScore > 60 ? (peakScore - 60) * 0.6 : 0;
 
-  return Math.min(100, Math.round(p90Score * 0.75 + peakBonus));
+  return Math.min(100, Math.round(p90Score * 0.80 + peakBonus));
 }
 
 // ─── FACTOR AGGREGATION ──────────────────────────────────────────────────────

@@ -8,10 +8,10 @@ import ElevationChart from '@/components/ElevationChart'
 import Toast from '@/components/Toast'
 import { formatDuration, formatDistance } from '@/utils/format'
 import {
-  sampleCoords, sampleByTime,
-  fetchWeatherData, fetchElevationData,
+  sampleCoords,
+  fetchElevationData,
   processElevation, getNotableWaypoints, getConditionCallout,
-  computeRouteRisk,
+  computeRouteRisk, buildTimelineFromSegments,
 } from '@/utils/weatherElevation'
 
 mapboxgl.accessToken = import.meta.env.VITE_MAPBOX_TOKEN
@@ -129,21 +129,6 @@ function waypointRiskColor(pt) {
   return C.accent
 }
 
-// ── Elevation gain in a ±windowMiles window around a route fraction ──
-function localElevGain(elevFeet, distanceLabels, centerFraction, windowMiles = 30) {
-  if (!elevFeet || !distanceLabels) return 0
-  const totalMiles  = parseFloat(distanceLabels[distanceLabels.length - 1])
-  const centerMile  = centerFraction * totalMiles
-  const half        = windowMiles / 2
-  let gain = 0
-  for (let i = 1; i < elevFeet.length; i++) {
-    const mile = parseFloat(distanceLabels[i])
-    if (mile < centerMile - half || mile > centerMile + half) continue
-    const diff = elevFeet[i] - elevFeet[i - 1]
-    if (diff > 0) gain += diff
-  }
-  return gain
-}
 
 // ── Reverse geocode a coordinate to its nearest city name ────
 async function fetchCityName(lng, lat) {
@@ -160,61 +145,83 @@ async function fetchCityName(lng, lat) {
   }
 }
 
-// ── Generate Route Alerts from weather + elevation data ───────
-function generateAlerts(weatherPoints, cityNames, elevation) {
+// ── Generate Route Alerts from risk-engine segment data ──────
+// Driven by the same segments that produce factor scores, so alerts
+// and risk scores are always consistent with each other.
+async function generateAlertsFromSegments(segments) {
+  if (!segments?.length) {
+    return [{
+      type: 'clear', emoji: '✅',
+      title:    'All clear',
+      subtitle: 'No significant weather concerns along this route.',
+      meta:     null,
+    }]
+  }
+
+  // Derive timeSeconds for a segment from its arrivalTimeMs relative to route start
+  const routeStartMs = segments[0]?.arrivalTimeMs ?? Date.now()
+  const segTimeSeconds = (seg) => Math.max(0, Math.round((seg.arrivalTimeMs - routeStartMs) / 1000))
+
   const alerts = []
-  const seen   = new Set()
-  const n      = weatherPoints.length
 
-  weatherPoints.forEach((pt, i) => {
-    const city     = cityNames[i] || 'this location'
-    const time     = formatTimeline(pt.timeSeconds)
-    const fraction = n > 1 ? i / (n - 1) : 0
+  // Rain — any segment with precip > 0.1 mm; highlight worst
+  const rainSegs = segments.filter(s => s.weather.precipMm > 0.1)
+  if (rainSegs.length > 0) {
+    const worst = rainSegs.reduce((a, b) => b.weather.precipMm > a.weather.precipMm ? b : a)
+    const city  = await fetchCityName(worst.coord[0], worst.coord[1]) ?? 'this location'
+    const time  = formatTimeline(segTimeSeconds(worst))
+    alerts.push({
+      type: 'rain', emoji: '🌧️',
+      title:    `Rain at ${time}`,
+      subtitle: `Near ${city} — allow extra following distance`,
+      meta:     `${time} · ${city}`,
+    })
+  }
 
-    if (!seen.has('rain') && pt.precipMm > 0.1) {
-      seen.add('rain')
-      const gain    = localElevGain(elevation?.elevFeet, elevation?.distanceLabels, fraction)
-      const context = gain > 200
-        ? 'wet road on a descent — reduce speed'
-        : 'allow extra following distance'
-      alerts.push({
-        type: 'rain', emoji: '🌧️',
-        title:    `Rain at ${time}`,
-        subtitle: `${pt.label} near ${city} — ${context}`,
-        meta:     `${time} · ${city}`,
-      })
-    }
+  // Wind — any segment > 32 kph (~20 mph); highlight worst
+  const windSegs = segments.filter(s => s.weather.windKph > 32)
+  if (windSegs.length > 0) {
+    const worst   = windSegs.reduce((a, b) => b.weather.windKph > a.weather.windKph ? b : a)
+    const city    = await fetchCityName(worst.coord[0], worst.coord[1]) ?? 'this location'
+    const time    = formatTimeline(segTimeSeconds(worst))
+    const windMph = Math.round(worst.weather.windKph * 0.621)
+    alerts.push({
+      type: 'wind', emoji: '💨',
+      title:    `Strong winds at ${time}`,
+      subtitle: `${windMph} mph near ${city} — allow extra space when overtaking`,
+      meta:     `${time} · ${city}`,
+    })
+  }
 
-    if (!seen.has('wind') && pt.windMph > 20) {
-      seen.add('wind')
-      alerts.push({
-        type: 'wind', emoji: '💨',
-        title:    `Strong winds at ${time}`,
-        subtitle: `${pt.windMph} mph near ${city} — allow extra space when overtaking`,
-        meta:     `${time} · ${city}`,
-      })
-    }
+  // Freezing — any segment < 1.7 °C (= 35 °F); highlight coldest
+  const freezeSegs = segments.filter(s => s.weather.tempC < 1.7)
+  if (freezeSegs.length > 0) {
+    const worst = freezeSegs.reduce((a, b) => a.weather.tempC < b.weather.tempC ? a : b)
+    const city  = await fetchCityName(worst.coord[0], worst.coord[1]) ?? 'this location'
+    const time  = formatTimeline(segTimeSeconds(worst))
+    const tempF = Math.round(worst.weather.tempC * 9 / 5 + 32)
+    alerts.push({
+      type: 'freeze', emoji: '🧊',
+      title:    `Freezing risk at ${time}`,
+      subtitle: `Temperature drops to ${tempF}°F near ${city} — watch for black ice on bridges and elevated sections`,
+      meta:     `${time} · ${city}`,
+    })
+  }
 
-    if (!seen.has('freeze') && pt.tempF < 35) {
-      seen.add('freeze')
-      alerts.push({
-        type: 'freeze', emoji: '🧊',
-        title:    `Freezing risk at ${time}`,
-        subtitle: `Temperature drops to ${pt.tempF}°F near ${city} — watch for black ice on bridges and elevated sections`,
-        meta:     `${time} · ${city}`,
-      })
-    }
-
-    if (!seen.has('vis') && pt.visibilityMi < 3) {
-      seen.add('vis')
-      alerts.push({
-        type: 'vis', emoji: '🌫️',
-        title:    `Low visibility at ${time}`,
-        subtitle: `${pt.visibilityMi} mi visibility near ${city} — use fog lights and reduce speed`,
-        meta:     `${time} · ${city}`,
-      })
-    }
-  })
+  // Visibility — any segment < 4.8 km (~3 mi); highlight worst
+  const visSegs = segments.filter(s => s.weather.visibilityKm < 4.8)
+  if (visSegs.length > 0) {
+    const worst = visSegs.reduce((a, b) => a.weather.visibilityKm < b.weather.visibilityKm ? a : b)
+    const city  = await fetchCityName(worst.coord[0], worst.coord[1]) ?? 'this location'
+    const time  = formatTimeline(segTimeSeconds(worst))
+    const visMi = parseFloat((worst.weather.visibilityKm / 1.609).toFixed(1))
+    alerts.push({
+      type: 'vis', emoji: '🌫️',
+      title:    `Low visibility at ${time}`,
+      subtitle: `${visMi} mi visibility near ${city} — use fog lights and reduce speed`,
+      meta:     `${time} · ${city}`,
+    })
+  }
 
   if (alerts.length === 0) {
     alerts.push({
@@ -227,13 +234,6 @@ function generateAlerts(weatherPoints, cityNames, elevation) {
   return alerts
 }
 
-// ── Sample ≤ maxMarkers evenly-spaced points for map display ──
-function sampleMarkersToShow(points, max = 8) {
-  if (points.length <= max) return points
-  return Array.from({ length: max }, (_, i) =>
-    points[Math.round((i / (max - 1)) * (points.length - 1))]
-  )
-}
 
 // ── Risk score interpolation ──────────────────────────────────
 function interpolateScore(value, breakpoints) {
@@ -834,8 +834,10 @@ export default function App() {
   }
 
   // ── Load conditions for ALL routes simultaneously ────────────
-  // Fetches weather then elevation for every route in parallel,
-  // so both cards are scored immediately — no second fetch on route switch.
+  // Single weather fetch per route: elevation first, then computeRouteRisk
+  // (which fetches weather internally at segment midpoints). The timeline
+  // is built from segment data so risk score, alerts, and timeline are
+  // always consistent with each other.
   async function loadAllConditions(routes, deptDate = new Date()) {
     setConditionsLoading(true)
     setAllConditions([])
@@ -845,27 +847,13 @@ export default function App() {
     clearWeatherMarkers()
     clearElevHoverMarker()
     try {
-      // Pre-compute sample arrays for every route
-      const meta = routes.map(r => ({
-        coords:             r.geometry.coordinates,
-        totalDistanceMiles: r.distance / 1609.344,
-        elevSamples:        sampleCoords(r.geometry.coordinates, 80),
-        timePoints:         sampleByTime(r.geometry.coordinates, r.duration),
-      }))
-
-      // Phase 1 — weather for all routes in parallel
-      setLoadingPhase('weather')
-      const allWeatherPoints = await Promise.all(
-        meta.map(m => fetchWeatherData(m.timePoints, deptDate))
-      )
-
-      // Phase 2 — elevation for all routes in parallel
+      // Phase 1 — elevation for all routes in parallel
       setLoadingPhase('elevation')
       const allElevMeters = await Promise.all(
-        meta.map(m => fetchElevationData(m.elevSamples))
+        routes.map(r => fetchElevationData(sampleCoords(r.geometry.coordinates, 80)))
       )
 
-      // Phase 3 — new segment-level risk engine (runs per route sequentially to avoid rate limits)
+      // Phase 2 — segment-level risk engine (fetches weather internally per segment)
       setLoadingPhase('scoring')
       const allRiskData = await Promise.all(
         routes.map((r, i) => computeRouteRisk({
@@ -879,17 +867,11 @@ export default function App() {
         }))
       )
 
-      // Reverse-geocode all waypoints across all routes in parallel
-      const allCityNames = await Promise.all(
-        allWeatherPoints.map(pts =>
-          Promise.all(pts.map(pt => fetchCityName(pt.coords[0], pt.coords[1])))
-        )
-      )
-
-      // Assemble per-route condition objects
-      const results = meta.map((m, i) => {
-        const elevation     = processElevation(allElevMeters[i], m.totalDistanceMiles)
-        const weatherPoints = allWeatherPoints[i]
+      // Assemble per-route condition objects.
+      // weatherPoints is built from segment data — single source of truth.
+      const results = routes.map((r, i) => {
+        const elevation     = processElevation(allElevMeters[i], r.distance / 1609.344)
+        const weatherPoints = buildTimelineFromSegments(allRiskData[i]?.segments ?? [], deptDate)
         return {
           elevation,
           weatherPoints,
@@ -898,23 +880,21 @@ export default function App() {
         }
       })
 
-      const rsList    = allRiskData  // new engine results replace calculateRiskScore
-      const alertList = results.map((r, i) => generateAlerts(r.weatherPoints, allCityNames[i], r.elevation))
+      const rsList    = allRiskData
+      const alertList = await Promise.all(
+        allRiskData.map(riskData => generateAlertsFromSegments(riskData?.segments ?? []))
+      )
 
       setAllConditions(results)
       allConditionsRef.current = results
       setAllRiskScores(rsList)
       setAllAlerts(alertList)
 
-      // Show weather markers for whichever route is currently active
+      // Show weather markers — buildTimelineFromSegments already limits to 8 points
       const map = mapRef.current
       const activeResult = results[activeRouteIdxRef.current]
       if (map && activeResult) {
-        addWeatherMarkersToMap(
-          map,
-          sampleMarkersToShow(activeResult.weatherPoints, 8),
-          weatherMarkersRef.current
-        )
+        addWeatherMarkersToMap(map, activeResult.weatherPoints, weatherMarkersRef.current)
       }
     } catch {
       setToast('Weather data temporarily unavailable')
@@ -1031,11 +1011,7 @@ export default function App() {
     clearElevHoverMarker()
     const storedResult = allConditionsRef.current[idx]
     if (map && storedResult) {
-      addWeatherMarkersToMap(
-        map,
-        sampleMarkersToShow(storedResult.weatherPoints, 8),
-        weatherMarkersRef.current
-      )
+      addWeatherMarkersToMap(map, storedResult.weatherPoints, weatherMarkersRef.current)
     }
   }
 
@@ -2410,9 +2386,8 @@ export default function App() {
           ) : (
             <p style={{ fontSize: 12, color: C.textMuted }}>
               {conditionsLoading
-                ? loadingPhase === 'weather'   ? 'Fetching weather…'
-                : loadingPhase === 'elevation' ? 'Loading elevation…'
-                : loadingPhase === 'scoring'   ? 'Scoring route…'
+                ? loadingPhase === 'elevation' ? 'Loading elevation…'
+                : loadingPhase === 'scoring'   ? 'Fetching weather & scoring route…'
                 : 'Analyzing conditions…'
                 : 'Find a route to see weather conditions.'}
             </p>
